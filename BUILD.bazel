@@ -1,0 +1,22 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "co",
+    srcs = [
+        "coroutine.cc",
+    ],
+    hdrs = [
+        "coroutine.h",
+         "bitset.h",
+   ],
+    deps = [
+    ],
+)
+
+cc_binary(
+    name = "cotest",
+    srcs = ["cotest.cc"],
+    deps = [
+        ":co",
+    ]
+)
