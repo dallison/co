@@ -70,6 +70,7 @@ static void ClearEvent(int fd) {
 }
 
 Coroutine::Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
+                     bool autostart,
                      size_t stack_size, void *user_data)
     : machine_(machine), functor_(std::move(functor)), stack_size_(stack_size),
       user_data_(user_data) {
@@ -86,6 +87,15 @@ Coroutine::Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
   wait_fd_.fd = -1;
   wait_fd_.events = POLLIN;
   machine_.AddCoroutine(this);
+  if (autostart) {
+    Start();
+  }
+}
+
+Coroutine::~Coroutine() {
+  free(stack_);
+  CloseEventFd(event_fd_.fd);
+  CloseEventFd(wait_fd_.fd);
 }
 
 void Coroutine::Exit() { longjmp(exit_, 1); }
@@ -382,10 +392,6 @@ Coroutine *CoroutineMachine::GetRunnableCoroutine(PollState *poll_state,
     // Interrupted.
     ClearEvent(interrupt_fd_.fd);
   }
-  if (!running_) {
-    // If we have been asked to stop, there's nothing else to do.
-    return nullptr;
-  }
 
   Coroutine *chosen = ChooseRunnable(poll_state, num_ready);
 
@@ -455,6 +461,10 @@ void CoroutineMachine::RemoveCoroutine(Coroutine *c) {
   for (auto it = coroutines_.begin(); it != coroutines_.end(); it++) {
     if (*it == c) {
       coroutines_.erase(it);
+      // Call completion callback to allow for external memory management.
+      if (completion_callback_ != nullptr) {
+        completion_callback_(c);
+      }
       break;
     }
   }

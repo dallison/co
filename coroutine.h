@@ -23,6 +23,7 @@ class CoroutineMachine;
 class Coroutine;
 
 using CoroutineFunctor = std::function<void(Coroutine *)>;
+using CompletionCallback = std::function<void(Coroutine*)>;
 
 constexpr size_t kCoDefaultStackSize = 8192;
 
@@ -40,10 +41,10 @@ enum class CoroutineState {
 // The functor must be convertible to a function address.
 class Coroutine {
 public:
-  Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
+  Coroutine(CoroutineMachine &machine, CoroutineFunctor functor, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
-  ~Coroutine() { free(stack_); }
+  ~Coroutine();
 
   // Start a coroutine running if it is not already running,
   void Start();
@@ -134,6 +135,10 @@ public:
 
   jmp_buf& YieldBuf() { return yield_; }
   
+  void SetCompletionCallback(CompletionCallback callback) {
+    completion_callback_ = callback;
+  }
+
 private:
   void BuildPollFds(PollState *poll_state);
   Coroutine *ChooseRunnable(PollState *poll_state, int num_ready);
@@ -149,6 +154,7 @@ private:
   PollState poll_state_;
   struct pollfd interrupt_fd_;
   uint64_t tick_count_ = 0;
+  CompletionCallback completion_callback_;
 };
 
 } // namespace co
