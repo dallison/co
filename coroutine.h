@@ -25,7 +25,7 @@ class Coroutine;
 using CoroutineFunctor = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine*)>;
 
-constexpr size_t kCoDefaultStackSize = 8192;
+constexpr size_t kCoDefaultStackSize = 32*1024;
 
 enum class CoroutineState {
   kCoNew,
