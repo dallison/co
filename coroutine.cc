@@ -118,6 +118,17 @@ void Coroutine::Wait(int fd, int event_mask) {
   wait_fd_.fd = -1;
 }
 
+void Coroutine::Wait(struct pollfd& fd) {
+  state_ = CoroutineState::kCoWaiting;
+  wait_fd_ = fd;
+  yielded_address_ = __builtin_return_address(0);
+  last_tick_ = machine_.TickCount();
+  if (setjmp(resume_) == 0) {
+    longjmp(machine_.YieldBuf(), 1);
+  }
+  wait_fd_.fd = -1;
+}
+
 void Coroutine::TriggerEvent() { co::TriggerEvent(event_fd_.fd); }
 
 void Coroutine::ClearEvent() { co::ClearEvent(event_fd_.fd); }

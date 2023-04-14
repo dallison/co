@@ -60,6 +60,9 @@ public:
   // Wait for a file descriptor to become ready.
   void Wait(int fd, int event_mask);
 
+  // Wait for a pollfd.
+  void Wait(struct pollfd& fd);
+
   void TriggerEvent();
   void ClearEvent();
   void Exit();
