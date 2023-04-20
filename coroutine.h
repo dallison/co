@@ -12,10 +12,11 @@
 #include <functional>
 #include <list>
 #include <poll.h>
-#include <setjmp.h>
-#include <stdint.h>
+#include <csetjmp>
+#include <cstdint>
 #include <string>
 #include <vector>
+#include <ctime>
 
 namespace co {
 
@@ -67,6 +68,9 @@ public:
   void ClearEvent();
   void Exit();
   void Resume();
+  void Nanosleep(uint64_t ns);
+  void Millisleep(time_t msecs) { Nanosleep(msecs * 1000000); }
+  void Sleep(time_t secs) { Nanosleep(secs * 1000000000); }
 
   void SetName(const std::string &name) { name_ = name; }
   const std::string &GetName() const { return name_; }

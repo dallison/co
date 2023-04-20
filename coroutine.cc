@@ -7,10 +7,10 @@
 
 #include "coroutine.h"
 #include "bitset.h"
+#include <algorithm>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <algorithm>
 
 #if defined(__APPLE__)
 #include <sys/event.h>
@@ -19,6 +19,7 @@
 
 #elif defined(__linux__)
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 
 #else
 #error "Unknown operating system"
@@ -71,8 +72,7 @@ static void ClearEvent(int fd) {
 }
 
 Coroutine::Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
-                     bool autostart,
-                     size_t stack_size, void *user_data)
+                     bool autostart, size_t stack_size, void *user_data)
     : machine_(machine), functor_(std::move(functor)), stack_size_(stack_size),
       user_data_(user_data) {
   id_ = machine_.AllocateId();
@@ -119,7 +119,7 @@ void Coroutine::Wait(int fd, int event_mask) {
   wait_fd_.fd = -1;
 }
 
-void Coroutine::Wait(struct pollfd& fd) {
+void Coroutine::Wait(struct pollfd &fd) {
   state_ = CoroutineState::kCoWaiting;
   wait_fd_ = fd;
   yielded_address_ = __builtin_return_address(0);
@@ -128,6 +128,34 @@ void Coroutine::Wait(struct pollfd& fd) {
     longjmp(machine_.YieldBuf(), 1);
   }
   wait_fd_.fd = -1;
+}
+
+void Coroutine::Nanosleep(uint64_t ns) {
+#if defined(__APPLE__)
+  int kq = kqueue();
+  struct kevent e;
+
+  EV_SET(&e, 1, EVFILT_TIMER, EV_ADD, NOTE_NSECONDS, ns, 0);
+  kevent(kq, &e, 1, NULL, 0, NULL);
+  Wait(kq, POLLIN);
+  EV_SET(&e, 1, EVFILT_TIMER, EV_DELETE, 0, 0, 0);
+  kevent(kq, &e, 1, NULL, 0, NULL);
+  close(kq);
+#elif defined(__linux__)
+  struct itimerspec new_value;
+  struct timespec now;
+  constexpr int kBillion = 1000000000;
+
+  clock_gettime(CLOCK_REALTIME, &now);
+  new_value.it_value.tv_sec = now.tv_sec + ns / kBillion;
+  new_value.it_value.tv_nsec = now.tv_nsec + ns % kBillion;
+  new_value.it_interval.tv_sec = 0;
+  new_value.it_interval.tv_nsec = 0;
+  int fd = timerfd_create(CLOCK_REALTIME, 0);
+  timerfd_settime(fd, TFD_TIMER_ABSTIME, &new_value, NULL);
+  Wait(fd, POLLIN);
+  close(fd);
+#endif
 }
 
 void Coroutine::TriggerEvent() { co::TriggerEvent(event_fd_.fd); }
@@ -256,8 +284,8 @@ void Coroutine::Resume() {
           "mov x29, #0\n"     // FP = 0
           "sub sp, %0, #32\n" // Set new stack pointer.
           "stp x12, x13, [sp, #16]\n"
-          "str %1, [sp]\n"    // Save exit state to stack.
-          : /* no output regs*/
+          "str %1, [sp]\n" // Save exit state to stack.
+          :                /* no output regs*/
           : "r"(sp), "r"(exit_state)
           : "x12", "x13");
 
@@ -268,7 +296,7 @@ void Coroutine::Resume() {
       functor_(this);
 
       // Restore the stack pointer and jump to exit jmp_buf
-      asm("ldr x0, [sp]\n"    // Restore exit state.
+      asm("ldr x0, [sp]\n" // Restore exit state.
           "ldp x12, x29, [sp, #16]\n"
           "mov sp, x12\n" // Restore stack pointer
           "mov w1, #1\n"
@@ -287,21 +315,20 @@ void Coroutine::Resume() {
           "pushq %%r15\n"    // Push rbp
           "pushq %1\n"       // Push env
           "subq $8, %%rsp\n" // Align to 16
-          : /* no output regs*/
+          :                  /* no output regs*/
           : "r"(sp), "r"(exit_state)
           : "%r14", "%r15");
 
-        // Call the functor on the new stack.
-        functor_(this);
+      // Call the functor on the new stack.
+      functor_(this);
 
       // Restore the stack pointer and jump to exit jmp_buf
-      asm( "addq $8, %rsp\n" // Remove alignment.
+      asm("addq $8, %rsp\n" // Remove alignment.
           "popq %rdi\n"     // Pop env
           "popq %rbp\n"
           "popq %rsp\n"
           "movl $1, %esi\n"
-          "callq longjmp\n"
-          );
+          "callq longjmp\n");
 
 #else
 #error "Unknown architecture"

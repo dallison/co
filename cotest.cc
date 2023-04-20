@@ -7,46 +7,12 @@
 
 #include "coroutine.h"
 #include <stdio.h>
-
-#if defined(__APPLE__)
-#include <sys/event.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#endif
-
 #include <unistd.h>
 
-#if defined(__linux__)
-#include <sys/timerfd.h>
-#endif
 
 using namespace co;
 
 int pipes[2];
-
-#if defined(__APPLE__)
-static void NewTimer(int kq, int millis) {
-  struct kevent e;
-
-  EV_SET(&e, 1, EVFILT_TIMER, EV_ADD, 0, millis, 0);
-  kevent(kq, &e, 1, NULL, 0, NULL);
-}
-
-static void ClearTimer(int kq) {
-  struct kevent e;
-
-  EV_SET(&e, 1, EVFILT_TIMER, EV_DELETE, 0, 0, 0);
-  kevent(kq, &e, 1, NULL, 0, NULL);
-}
-#elif defined(__linux__)
-
-static void NewTimer(int fd, int millis) {}
-
-static void ClearTimer(int fd) {
-  int64_t val;
-  (void)read(fd, &val, 8);
-}
-#endif
 
 void Co1(Coroutine *c) {
   Coroutine generator(c->Machine(), [](Coroutine *c) {
@@ -54,28 +20,13 @@ void Co1(Coroutine *c) {
       c->YieldValue(&i);
     }
   });
-#if defined(__APPLE__)
-  int fd = kqueue();
-#elif defined(__linux__)
-  struct itimerspec new_value;
-  struct timespec now;
-  clock_gettime(CLOCK_REALTIME, &now);
-  new_value.it_value.tv_sec = now.tv_sec;
-  new_value.it_value.tv_nsec = now.tv_nsec;
-  new_value.it_interval.tv_sec = 0;
-  new_value.it_interval.tv_nsec = 100000000;
-  int fd = timerfd_create(CLOCK_REALTIME, 0);
-  timerfd_settime(fd, TFD_TIMER_ABSTIME, &new_value, NULL);
 
-#endif
   while (c->IsAlive(generator)) {
     int value = 0;
     c->Call(generator, &value, sizeof(value));
     if (c->IsAlive(generator)) {
       printf("Value: %d\n", value);
-      NewTimer(fd, 100);
-      c->Wait(fd, POLLIN);
-      ClearTimer(fd);
+      c->Millisleep(1000);
     }
   }
 }
