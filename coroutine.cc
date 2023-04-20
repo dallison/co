@@ -328,7 +328,12 @@ void Coroutine::Resume() {
           "popq %rbp\n"
           "popq %rsp\n"
           "movl $1, %esi\n"
-          "callq longjmp\n");
+#if defined(__APPLE__)
+          "call _longjmp\n"
+#else
+          "call longjmp\n"
+#endif
+      );
 
 #else
 #error "Unknown architecture"
