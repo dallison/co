@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <algorithm>
 
 #if defined(__APPLE__)
 #include <sys/event.h>
@@ -144,8 +145,9 @@ struct pollfd *Coroutine::GetPollFd() {
   case CoroutineState::kCoNew:
   case CoroutineState::kCoRunning:
   case CoroutineState::kCoDead:
-    return &empty;
+    break;
   }
+  return &empty;
 }
 
 void Coroutine::Show() {
@@ -288,17 +290,16 @@ void Coroutine::Resume() {
           : /* no output regs*/
           : "r"(sp), "r"(exit_state)
           : "%r14", "%r15");
-          );
 
         // Call the functor on the new stack.
         functor_(this);
 
       // Restore the stack pointer and jump to exit jmp_buf
-      asm( "addq $8, %%rsp\n" // Remove alignment.
-          "popq %%rdi\n"     // Pop env
-          "popq %%rbp\n"
-          "popq %%rsp\n"
-          "movl $1, %%esi\n"
+      asm( "addq $8, %rsp\n" // Remove alignment.
+          "popq %rdi\n"     // Pop env
+          "popq %rbp\n"
+          "popq %rsp\n"
+          "movl $1, %esi\n"
           "callq longjmp\n"
           );
 

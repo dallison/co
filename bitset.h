@@ -2,6 +2,9 @@
 #define __BITSET_H
 
 #include <vector>
+#include <cstdlib>
+#include <cstddef>
+#include <strings.h>
 
 namespace co {
 
@@ -11,16 +14,16 @@ public:
   int Allocate();
 
   // Free a bit.
-  void Free(int bit);
+  void Free(size_t bit);
 
   // Set a bit.
-  void Set(int bit);
+  void Set(size_t bit);
 
   // Is the bitset empty (all bits clear)?
   bool IsEmpty() const;
 
   // Is the given bit set?
-  bool Contains(int bit) const;
+  bool Contains(size_t bit) const;
 
 private:
   // Note the use of explicit long long type here because
@@ -48,8 +51,8 @@ inline int BitSet::Allocate() {
   }
 }
 
-inline void BitSet::Free(int bit) {
-  int word = bit / 64;
+inline void BitSet::Free(size_t bit) {
+  size_t word = bit / 64;
   if (word < 0 || word >= bits_.size()) {
     return;
   }
@@ -57,8 +60,8 @@ inline void BitSet::Free(int bit) {
   bits_[word] &= ~(1 << b);
 }
 
-inline void BitSet::Set(int bit) {
-  int word = bit / 64;
+inline void BitSet::Set(size_t bit) {
+  size_t word = bit / 64;
   if (word < 0 || word >= bits_.size()) {
     return;
   }
@@ -67,7 +70,7 @@ inline void BitSet::Set(int bit) {
 }
 
 inline bool BitSet::IsEmpty() const {
-  for (int i = 0; i < bits_.size(); i++) {
+  for (size_t i = 0; i < bits_.size(); i++) {
     if (bits_[i] != 0) {
       return false;
     }
@@ -75,8 +78,8 @@ inline bool BitSet::IsEmpty() const {
   return true;
 }
 
-inline bool BitSet::Contains(int bit) const {
-  int word = bit / 64;
+inline bool BitSet::Contains(size_t bit) const {
+  size_t word = bit / 64;
   if (word < 0 || word >= bits_.size()) {
     return false;
   }
