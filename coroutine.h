@@ -1,9 +1,6 @@
-//
-//  coroutine.h
-//  coroutines
-//
-//  Created by David Allison on 3/13/23.
-//
+// Copyright 2023 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
 
 #ifndef coroutine_h
 #define coroutine_h

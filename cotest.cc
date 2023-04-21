@@ -1,9 +1,6 @@
-//
-//  cotest.cc
-//  coroutines
-//
-//  Created by David Allison on 3/13/23.
-//
+// Copyright 2023 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
 
 #include "coroutine.h"
 #include <stdio.h>
