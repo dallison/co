@@ -9,7 +9,7 @@ It has a similar API and implementation but the following differences are eviden
 1. Supports std::function as the coroutine execution function and thus allows
 the use of lambdas as well as regular functions.
 
-It is built using [Google's Bazel]https://github.com/bazelbuild/bazel).  The following
+It is built using [Google's Bazel](https://github.com/bazelbuild/bazel).  The following
 WORKSPACE entry can be used to import it into another Bazel-built system:
 
 ```
