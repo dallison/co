@@ -1,7 +1,7 @@
 # cocpp
 Coroutine library in C++
 
-This is a C++ version of my [C coroutines library](https://github.com/dallison/coroutines].
+This is a C++ version of my [C coroutines library](https://github.com/dallison/coroutines).
 It has a similar API and implementation but the following differences are evident:
 
 1. Has a C++ class interface rather than C structs and access functions
