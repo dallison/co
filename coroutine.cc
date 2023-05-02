@@ -264,6 +264,10 @@ void Coroutine::Call(Coroutine &callee, void *result, size_t result_size) {
   callee.result_ = nullptr;
 }
 
+void Coroutine::InvokeFunctor() {
+  functor_(this);
+}
+
 void Coroutine::Resume() {
   switch (state_) {
   case CoroutineState::kCoReady:
@@ -333,31 +337,26 @@ void Coroutine::Resume() {
       asm("movq %%rsp, %%r14\n" // Save current stack pointer.
           "movq %%rbp, %%r15\n" // Save current frame pointer
           "movq $0, %%rbp\n"    // FP = 0
-          "movq %1, %%rsp\n"
+          "movq %0, %%rsp\n"    
           "pushq %%r14\n"    // Push rsp
           "pushq %%r15\n"    // Push rbp
-          "pushq %2\n"       // Push env
+          "pushq %1\n"       // Push env
           "subq $8, %%rsp\n" // Align to 16
-          "movq %3, %0\n"    // Output this.
-          : "=r"(self)
-          : "r"(sp), "r"(exit_state), "r"(this)
-          : "%r14", "%r15");
-
-      // Call the functor on the new stack.
-      self->functor_(self);
-
-      // Restore the stack pointer and jump to exit jmp_buf
-      asm("addq $8, %rsp\n" // Remove alignment.
-          "popq %rdi\n"     // Pop env
-          "popq %rbp\n"
-          "popq %rsp\n"
-          "movl $1, %esi\n"
+          "movq %2, %%rdi\n" // this
+          "call _ZN2co9Coroutine13InvokeFunctorEv\n"
+          "addq $8, %%rsp\n" // Remove alignment.
+          "popq %%rdi\n"     // Pop env
+          "popq %%rbp\n"
+          "popq %%rsp\n"
+          "movl $1, %%esi\n"
 #if defined(__APPLE__)
           "call _longjmp\n"
 #else
           "call longjmp\n"
+          : 
+          : "r"(sp), "r"(exit_state), "r"(this)
+          : "%r14", "%r15");
 #endif
-      );
 
 #else
 #error "Unknown architecture"

@@ -88,6 +88,8 @@ public:
   int64_t Id() const { return id_; }
 
 private:
+  void InvokeFunctor();
+
   CoroutineMachine &machine_;
   size_t id_;                // Coroutine ID.
   std::string name_;         // Optional name.
