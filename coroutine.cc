@@ -276,55 +276,21 @@ void Coroutine::Resume() {
     if (setjmp(exit_) == 0) {
       void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
       jmp_buf &exit_state = exit_;
-      Coroutine* self;
 
-      // Move stack pointer.  The old value is saved onto the new stack.
-      // Technically this is illegal for an asm statement since the stack
-      // pointer is supposed to be the same on exit as it was on entry
-      // but this is special as I am deliberately manipulating the stack.
-      // Arguments:
-      // %0: output for the value of this
-      // %1: sp
-      // %2: exit_state
-      // %3: input value of this
-      //
-      // Why the input and output of 'this'?  Since we are leaving the handcoded
-      // assembly environment to call the functor, we need to tell it where
-      // the value of 'this' is.  If we were to just let the compiler use
-      // the value of this directly, it might reference it from the stack,
-      // which has moved.  So we explicitly output the value of this (in self)
-      // and use that for the functor call.
-      //
-      // Note that the call to the functor might use the stack to store a
-      // temp so we need to give it some space to do that.
-      //
-      // DANGER DANGER: while this works on all the systems I've tested,
-      // we need to examine the compiler's assembly output to make sure
-      // it works on an untested system.  The x86_64 output seems more
-      // stable than the aarch64.
-      //
-      // The good news is that if it doesn't work, it's pretty obvious
-      // with the program crashing in a call to longjmp.
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
-          "sub sp, %1, #256\n" // Set new stack pointer.
-          "stp x12, x13, [sp, #256-32]\n"
-          "str %2, [sp, #256-48]\n" // Save exit state to stack.
-          "mov %0, %3\n"        // Output value of this
-          : "=r"(self)
-          : "r"(sp), "r"(exit_state), "r"(this)
-          : "x12", "x13");
-
-      // Call the functor on the new stack.  Due to the usage of std::function
-      // we can't just all the function address because you might not
-      // be able to get it.  A lambda, for example has its own unique type
-      // so for std::function::target<T>() you have no way to know what T is.
-      self->functor_(self);
-
-      // Restore the stack pointer and jump to exit jmp_buf
-      asm("ldr x0, [sp, #256-48]\n" // Restore exit state.
-          "ldp x12, x29, [sp, #256-32]\n"
+          "sub sp, %0, #32\n" // Set new stack pointer.
+          "stp x12, x13, [sp, #16]\n"
+          "str %1, [sp, #0]\n" // Save exit state to stack.
+          "mov x0, %2\n"
+#if defined(__APPLE__)
+          "bl __ZN2co9Coroutine13InvokeFunctorEv\n"
+#else
+          "bl _ZN2co9Coroutine13InvokeFunctorEv\n"
+#endif
+          "ldr x0, [sp, #0]\n" // Restore exit state.
+          "ldp x12, x29, [sp, #16]\n"
           "mov sp, x12\n" // Restore stack pointer
           "mov w1, #1\n"
 #if defined(__APPLE__)
@@ -332,7 +298,10 @@ void Coroutine::Resume() {
 #else
           "bl longjmp\n"
 #endif
-      );
+          : 
+          : "r"(sp), "r"(exit_state), "r"(this)
+          : "x12", "x13");
+
 #elif defined(__x86_64__)
       asm("movq %%rsp, %%r14\n" // Save current stack pointer.
           "movq %%rbp, %%r15\n" // Save current frame pointer
@@ -343,7 +312,11 @@ void Coroutine::Resume() {
           "pushq %1\n"       // Push env
           "subq $8, %%rsp\n" // Align to 16
           "movq %2, %%rdi\n" // this
+#if defined(__APPLE__)
+          "call __ZN2co9Coroutine13InvokeFunctorEv\n"
+#else
           "call _ZN2co9Coroutine13InvokeFunctorEv\n"
+#endif
           "addq $8, %%rsp\n" // Remove alignment.
           "popq %%rdi\n"     // Pop env
           "popq %%rbp\n"
