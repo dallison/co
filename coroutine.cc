@@ -293,12 +293,20 @@ void Coroutine::Resume() {
       //
       // Note that the call to the functor might use the stack to store a
       // temp so we need to give it some space to do that.
+      //
+      // DANGER DANGER: while this works on all the systems I've tested,
+      // we need to examine the compiler's assembly output to make sure
+      // it works on an untested system.  The x86_64 output seems more
+      // stable than the aarch64.
+      //
+      // The good news is that if it doesn't work, it's pretty obvious
+      // with the program crashing in a call to longjmp.
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
-          "sub sp, %1, #64\n" // Set new stack pointer.
-          "stp x12, x13, [sp, #32]\n"
-          "str %2, [sp, #16]\n" // Save exit state to stack.
+          "sub sp, %1, #256\n" // Set new stack pointer.
+          "stp x12, x13, [sp, #256-32]\n"
+          "str %2, [sp, #256-48]\n" // Save exit state to stack.
           "mov %0, %3\n"        // Output value of this
           : "=r"(self)
           : "r"(sp), "r"(exit_state), "r"(this)
@@ -311,8 +319,8 @@ void Coroutine::Resume() {
       self->functor_(self);
 
       // Restore the stack pointer and jump to exit jmp_buf
-      asm("ldr x0, [sp, #16]\n" // Restore exit state.
-          "ldp x12, x29, [sp, #32]\n"
+      asm("ldr x0, [sp, #256-48]\n" // Restore exit state.
+          "ldp x12, x29, [sp, #256-32]\n"
           "mov sp, x12\n" // Restore stack pointer
           "mov w1, #1\n"
 #if defined(__APPLE__)
