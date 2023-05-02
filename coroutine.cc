@@ -305,7 +305,6 @@ void Coroutine::Resume() {
 #elif defined(__x86_64__)
       asm("movq %%rsp, %%r14\n" // Save current stack pointer.
           "movq %%rbp, %%r15\n" // Save current frame pointer
-          "movq $0, %%rbp\n"    // FP = 0
           "movq %0, %%rsp\n"    
           "pushq %%r14\n"    // Push rsp
           "pushq %%r15\n"    // Push rbp
