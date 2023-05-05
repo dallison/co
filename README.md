@@ -341,10 +341,11 @@ WORKSPACE entry can be used to import it into another Bazel-built system:
 ```
 http_archive(
   name = "coroutines",
-  urls = ["https://github.com/dallison/cocpp/archive/refs/tags/1.1.0.tar.gz"],
-  strip_prefix = "cocpp-1.1.0",
-  sha256 = "42cb1aafe7724b6c9cd1d42d8e9fb0ae518d4baefc8e39c762e622b736196c71"
+  urls = ["https://github.com/dallison/cocpp/archive/refs/tags/1.1.1.tar.gz"],
+  strip_prefix = "cocpp-1.1.1",
+  sha256 = "acc7eeaa1fc1d900881eb4c69a91d0bbaf790bf0992fd4692434757f0612aff8"
 )
+
 ```
 
 # Portability
