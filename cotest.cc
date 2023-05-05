@@ -31,7 +31,7 @@ void Writer(Coroutine *c) {
     char buf[256];
     size_t n = snprintf(buf, sizeof(buf), "FOO %d\n", i);
     c->Wait(pipes[1], POLLOUT);
-    write(pipes[1], buf, n);
+    (void)write(pipes[1], buf, n);
     // Yield here so that all the writes don't go at once.
     c->Yield();
   }
@@ -57,9 +57,9 @@ void TestWaitWithTimeout(Coroutine *c) {
   int waitpipe1[2];
   int waitpipe2[2];
   int waitpipe3[2];
-  pipe(waitpipe1);
-  pipe(waitpipe2);
-  pipe(waitpipe3);
+  (void)pipe(waitpipe1);
+  (void)pipe(waitpipe2);
+  (void)pipe(waitpipe3);
 
   int wait1_end = waitpipe1[0];
   int trigger1_end = waitpipe1[1];
@@ -77,7 +77,7 @@ void TestWaitWithTimeout(Coroutine *c) {
     } else if (fd == wait1_end) {
       printf("Waiter %s resumed due to input ready\n", c->Name().c_str());
       char buf[1];
-      read(fd, buf, 1); // Clear pipe.
+      (void)read(fd, buf, 1); // Clear pipe.
     } else {
       printf("Waiter %s resumed due to unknown value %d\n", c->Name().c_str(),
              fd);
@@ -95,7 +95,7 @@ void TestWaitWithTimeout(Coroutine *c) {
     } else if (fd == wait3_end) {
       printf("Waiter %s resumed due to input ready\n", c->Name().c_str());
       char buf[1];
-      read(fd, buf, 1); // Clear pipe.
+      (void)read(fd, buf, 1); // Clear pipe.
     } else {
       printf("Waiter %s resumed due to unknown value %d\n", c->Name().c_str(),
              fd);
@@ -107,14 +107,14 @@ void TestWaitWithTimeout(Coroutine *c) {
 
   Coroutine waiter2(c->Machine(), wait1_func, "waiter2");
   // Trigger waiter2.
-  write(trigger1_end, "x", 1);
+  (void)write(trigger1_end, "x", 1);
 
   Coroutine waiter3(c->Machine(), wait2_func, "waiter3");
   c->Sleep(2); // Cause timeout in waiter3.
 
   Coroutine waiter4(c->Machine(), wait2_func, "waiter4");
   // Trigger waiter4.
-  write(trigger3_end, "x", 1);
+  (void)write(trigger3_end, "x", 1);
 
   // Don't forget to tidy up.
   close(wait1_end);
@@ -126,7 +126,7 @@ void TestWaitWithTimeout(Coroutine *c) {
 }
 
 int main(int argc, const char *argv[]) {
-  pipe(pipes);
+  (void)pipe(pipes);
 
   CoroutineMachine m;
   Coroutine c1(m, Co1);

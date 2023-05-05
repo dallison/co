@@ -8,6 +8,7 @@
 #include "bitset.h"
 #include <csetjmp>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <functional>
 #include <list>
