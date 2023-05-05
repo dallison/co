@@ -409,3 +409,10 @@ There is some necessary assembly language magic involved in switching stacks and
 supports ARM64 (Aarch64) and x86_64 only.  32-bit ports would be pretty easy and can
 be done if requested.
 
+# Licensing
+This is licensed under the Apache License Version 2.0.  Please see the LICENSE
+file for details.
+
+If you would like to use this library in commercial or non-commercial applications
+and the license is not suitable for you, please contact me and I'll see what
+I can do.
