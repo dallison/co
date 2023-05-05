@@ -11,7 +11,7 @@ using namespace co;
 int pipes[2];
 
 void Co1(Coroutine *c) {
-  Generator<int> generator(c->Machine(), [](Generator<int> *c) {
+  Generator<int> generator(c->Scheduler(), [](Generator<int> *c) {
     for (int i = 1; i < 5; i++) {
       c->YieldValue(i);
     }
@@ -102,17 +102,17 @@ void TestWaitWithTimeout(Coroutine *c) {
     }
   };
 
-  Coroutine waiter1(c->Machine(), wait1_func, "waiter1");
+  Coroutine waiter1(c->Scheduler(), wait1_func, "waiter1");
   c->Sleep(2); // Cause timeout in waiter1.
 
-  Coroutine waiter2(c->Machine(), wait1_func, "waiter2");
+  Coroutine waiter2(c->Scheduler(), wait1_func, "waiter2");
   // Trigger waiter2.
   (void)write(trigger1_end, "x", 1);
 
-  Coroutine waiter3(c->Machine(), wait2_func, "waiter3");
+  Coroutine waiter3(c->Scheduler(), wait2_func, "waiter3");
   c->Sleep(2); // Cause timeout in waiter3.
 
-  Coroutine waiter4(c->Machine(), wait2_func, "waiter4");
+  Coroutine waiter4(c->Scheduler(), wait2_func, "waiter4");
   // Trigger waiter4.
   (void)write(trigger3_end, "x", 1);
 
@@ -128,18 +128,18 @@ void TestWaitWithTimeout(Coroutine *c) {
 int main(int argc, const char *argv[]) {
   (void)pipe(pipes);
 
-  CoroutineMachine m;
-  Coroutine c1(m, Co1);
+  CoroutineScheduler sched;
+  Coroutine c1(sched, Co1);
 
   c1.Start();
 
-  Coroutine writer(m, Writer);
-  Coroutine reader(m, Reader);
+  Coroutine writer(sched, Writer);
+  Coroutine reader(sched, Reader);
 
   reader.Start();
   writer.Start();
 
-  Coroutine wait_test(m, TestWaitWithTimeout);
+  Coroutine wait_test(sched, TestWaitWithTimeout);
 
-  m.Run();
+  sched.Run();
 }

@@ -18,15 +18,15 @@
 
 namespace co {
 
-class CoroutineMachine;
+class CoroutineScheduler;
 class Coroutine;
 template <typename T> class Generator;
 
-using CoroutineFunctor = std::function<void(Coroutine *)>;
+using CoroutineFunction = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine *)>;
 
 template <typename T>
-using GeneratorFunctor = std::function<void(Generator<T> *)>;
+using GeneratorFunction = std::function<void(Generator<T> *)>;
 
 constexpr size_t kCoDefaultStackSize = 32 * 1024;
 
@@ -36,7 +36,7 @@ void __co_Invoke(class Coroutine *c);
 
 template <typename T> class Generator;
 
-// This is a Coroutine.  It executes its functor (pointer to a function
+// This is a Coroutine.  It executes its function (pointer to a function
 // or a lambda).
 //
 // It has its own stack with default size kCoDefaultStackSize.
@@ -45,7 +45,7 @@ template <typename T> class Generator;
 // not owned by the coroutine.
 class Coroutine {
 public:
-  Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
+  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
             const char *name = nullptr, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
@@ -98,7 +98,7 @@ public:
   bool IsAlive();
 
   uint64_t LastTick() const { return last_tick_; }
-  CoroutineMachine &Machine() const { return machine_; }
+  CoroutineScheduler &Scheduler() const { return scheduler_; }
 
   void Show();
 
@@ -114,11 +114,11 @@ private:
     kCoWaiting,
     kCoDead,
   };
-  friend class CoroutineMachine;
+  friend class CoroutineScheduler;
   template <typename T> friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
-  void InvokeFunctor();
+  void InvokeFunction();
   int EndOfWait(int timer_fd, int result);
   int AddTimeout(int64_t timeout_ns);
   State GetState() const { return state_; }
@@ -130,9 +130,9 @@ private:
   void CallNonTemplate(Coroutine& c);
   void YieldNonTemplate();
 
-  CoroutineMachine &machine_;
+  CoroutineScheduler &scheduler_;
   size_t id_;                // Coroutine ID.
-  CoroutineFunctor functor_; // Coroutine body.
+  CoroutineFunction function_; // Coroutine body.
   std::string name_;         // Optional name.
   State state_;
   void *stack_;                     // Stack, allocated from malloc.
@@ -150,22 +150,25 @@ private:
 // A Generator is a coroutine that generates values.  The magic lamda line
 // noise is because you can't cast an std::function<void(B*)> to an
 // std::function<void(A*)> even though B is derived from A.
+//
+// A generator doesn't start automatically.  It's started on the
+// first call.
 template <typename T> class Generator : public Coroutine {
 public:
-  Generator(CoroutineMachine &machine, GeneratorFunctor<T> functor,
-            const char *name = nullptr, bool autostart = true,
+  Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
+            const char *name = nullptr,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
       : Coroutine(machine, [this](Coroutine *c) {
-                    gen_functor_(reinterpret_cast<Generator<T>*>(c));
+                    gen_function_(reinterpret_cast<Generator<T>*>(c));
                   },
-                  name, autostart, stack_size, user_data), gen_functor_(functor) {}
+                  name, /*autostart=*/false, stack_size, user_data), gen_function_(function) {}
 
   // Yield control and store value.
   void YieldValue(const T &value);
 
 private:
   friend class Coroutine;
-  GeneratorFunctor<T> gen_functor_;
+  GeneratorFunction<T> gen_function_;
   T *result_ = nullptr;              // Where to put result in YieldValue.
 };
 
@@ -174,16 +177,16 @@ struct PollState {
   std::vector<Coroutine *> coroutines;
 };
 
-class CoroutineMachine {
+class CoroutineScheduler {
 public:
-  CoroutineMachine();
-  ~CoroutineMachine();
+  CoroutineScheduler();
+  ~CoroutineScheduler();
 
-  // Run the machine until all coroutines have terminated or
+  // Run the scheduler until all coroutines have terminated or
   // told to stop.
   void Run();
 
-  // Stop the machine.  Running coroutines will not be terminated.
+  // Stop the scheduler.  Running coroutines will not be terminated.
   void Stop();
 
   void AddCoroutine(Coroutine *c);

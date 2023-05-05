@@ -25,16 +25,55 @@ This is similar to the *Go* language's, *goroutines*, but unfortunately, gorouti
 are distributed among a set of threads, so they aren't really coroutines and you
 still need thread synchronization when any data is shared among goroutines.
 
+## Performance and safety
+The use of coroutines in a program can improve the performance of the program
+if the program spends time waiting for I/O.  Since the program will
+be single-threaded, coroutines will not enable the execution to be split
+across multiple cores.  The latency of I/O handling can be improved though, if you
+arrange your program to handle each I/O session in a different coroutine.
+
+The use of threads in a program to speed it up is specious and rarely improves
+performance unless the program has been designed to allow the threads to
+work well over multiple cores.  The context switch of one thread to another is
+a substantial CPU burden and threads themselves consume a process in the OS.
+
+Coroutines, however do not suffer from a heavy context switch - it's just swapping
+the machine registers to a different context.  The judicious use of coroutines,
+combined with multiple processes and an IPC system can improve both latency and
+throughput in your system as well as safety.
+
+As for program safety, threads introduce a huge cognitive burden on the programmer
+to make sure that every piece of data in the program is protected against
+an errant thread overwriting it.  It is almost impossible for a programmer
+to cover every possible situation and thus there is no guarantee that a
+write to memory followed by a read of the same address in the same thread
+will result in a known value - another thread might have pre-empted you and
+clobbered your memory.
+
+Coroutines completely eliminate the need to for locking shared data in a program.
+Since only one coroutine can be executing at once, the access to memory is,
+by definition, serial.  This completely eliminates the need for locks unless
+you really need to share memory between processes and there are good
+solutions for that.
+
+However, coroutines are not a panacea and, since the program executes multiple
+coroutines in what appears to be parallel, you still have to deal with timing
+issues where a coroutine voluntarily suspends itself and another one affects
+some shared state.  When writing asynchronous applications, there is always
+the dimension of time to take into account, but a well designed system with
+multiplexed I/O and coroutines can be much safer than one that uses
+threads to achieve the same purpose.
+
+
 ## The API
 There are two C++ classes in the library:
 
 1. The main *Coroutine* class.  This is the object that represents a single coroutine
-1. The scheduler class, called *CoroutineMachine*.  This provides the multiplexed I/O
+1. The scheduler class, called *CoroutineScheduler*.  This provides the multiplexed I/O
 and schedules coroutines to run when they are ready.
 
-
 To create a coroutine, allocate an instance of *Coroutine*, passing it a reference
-to the *CoroutineMachine* and a function to invoke that contains the body of the
+to the *CoroutineScheduler* and a function to invoke that contains the body of the
 coroutine.  The function is an instance of *std::function* so this allows you to
 use anything that *std::function* supports, inluding free functions or lambdas with
 local captures.
@@ -42,12 +81,12 @@ local captures.
 The coroutine can call the *Wait* functions to wait for a file descriptor to
 become ready to read or write.  
 
-The API for *Coroutine* and *CoroutineMachine* is:
+The API for *Coroutine* and *CoroutineScheduler* is:
 
 ```c++
 class Coroutine {
 public:
-  Coroutine(CoroutineMachine &machine, CoroutineFunctor functor,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctor functor,
             const char *name = nullptr, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
@@ -105,7 +144,7 @@ public:
   bool IsAlive();
 
   uint64_t LastTick() const { return last_tick_; }
-  CoroutineMachine &Machine() const { return machine_; }
+  CoroutineScheduler &Scheduler() const { return scheduler_; }
 
   void Show();
 
@@ -113,16 +152,16 @@ public:
   int64_t Id() const { return id_; }
 };
 
-class CoroutineMachine {
+class CoroutineScheduler {
 public:
-  CoroutineMachine();
-  ~CoroutineMachine();
+  CoroutineScheduler();
+  ~CoroutineScheduler();
 
-  // Run the machine until all coroutines have terminated or
+  // Run the scheduler until all coroutines have terminated or
   // told to stop.
   void Run();
 
-  // Stop the machine.  Running coroutines will not be terminated.
+  // Stop the scheduler.  Running coroutines will not be terminated.
   void Stop();
 
   void AddCoroutine(Coroutine *c);
@@ -154,18 +193,18 @@ In addition to the function to be called, a coroutine has:
 1. Its own fixed size stack
 1. Optional user data that is not owned by the coroutine
 
-Coroutines run until they yield control back to the scheduler using the *Yield*, 
-*YieldValue* or *Wait* functions.  Since they all run in a single thread, there
+Coroutines run until they yield control back to the scheduler using the *Yield*
+or *Wait* functions.  Since they all run in a single thread, there
 is never any need to synchronize shared data.
 
 ## Coroutine Lifecycle management
-The *CoroutineMachine* object does not own the *Coroutine* instances.  The
+The *CoroutineScheduler* object does not own the *Coroutine* instances.  The
 lifetime of the coroutines is managed by the program that's using the
-*CoroutineMachine*.  This means that coroutines can be allocated anywhere
+*CoroutineScheduler*.  This means that coroutines can be allocated anywhere
 and their lifecycle managed using techniques such as *std::unique_ptr*.
 
-To aid in this, the *CoroutineMachine* class has a way to register a function
-that wil be called when a coroutine finishes.   For example, say you decide
+To aid in this, the *CoroutineScheduler* class has a way to register a function
+that will be called when a coroutine finishes.   For example, say you decide
 to hold you coroutines in a set of *std::unique_ptr* instances:
 
 ```c++
@@ -175,28 +214,31 @@ absl::flat_hash_set<std::unique_ptr<co::Coroutine>> coroutines_;
 You can remove coroutines from this set when they complete using:
 
 ```c++
-  co_machine_.SetCompletionCallback(
+  co_scheduler_.SetCompletionCallback(
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 ```
 
 
-## Yielding
+## Yielding and Generators
 If a coroutine has a long-running task to perform it should be nice to other
 coroutines by calling *Yield* to give others a chance to run.  It is actually
 unusual for a coroutine to need to do this, but not impossible.
 
-Another way to yield is to yield a value using the *YieldValue* function.  This
-is combined with a *Call* function to implement *generators*.  A *Generator* is
+Another way to yield is to yield a value using the Generator's *YieldValue* function.
+This is combined with a *Call* function to implement *generators*.  A *Generator* is
 a typed *Coroutine* that provides the *YieldValue* function that yields the
 appropriate type.  You must *Call* a generator that yields the correct type otherwise
 compilation errors will result.
+
+The *Generator* template is derived from *Coroutine* and adds a *YieldValue*
+function that copies a value to the calling coroutine and yields control.
 
 For example, here's a generator coroutine that prints the numbers generated by
 another coroutine once a second.
 
 ```c++
 void Co1(Coroutine *c) {
-  Generator<int> generator(c->Machine(), [](Generator<int> *c) {
+  Generator<int> generator(c->Scheduler(), [](Generator<int> *c) {
     for (int i = 1; i < 5; i++) {
       c->YieldValue(i);
     }
@@ -273,18 +315,18 @@ absl::Status Server::Run() {
   // Register a callback to be called when a coroutine completes.  The
   // server keeps track of all coroutines created for handling commands.
   // This deletes them when they are done.
-  co_machine_.SetCompletionCallback(
+  co_scheduler_.SetCompletionCallback(
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 
   // Start the listener coroutine.
-  co::Coroutine listener(co_machine_, [this, &listen_socket](co::Coroutine *c) {
+  co::Coroutine listener(co_scheduler_, [this, &listen_socket](co::Coroutine *c) {
     ListenerCoroutine(std::move(listen_socket), c);
   });
 
   // Other coroutines here...
 
   // Run the coroutine main loop.
-  co_machine_.Run();
+  co_scheduler_.Run();
   return absl::OkStatus();
 }
 
@@ -306,7 +348,7 @@ absl::Status Server::HandleIncomingConnection(UnixSocket &listen_socket,
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
   coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_machine_, [handler_ptr](co::Coroutine *c) { handler_ptr->Run(c); }));
+      co_scheduler_, [handler_ptr](co::Coroutine *c) { handler_ptr->Run(c); }));
 
   return absl::OkStatus();
 }
