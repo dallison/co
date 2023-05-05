@@ -275,6 +275,25 @@ void Coroutine::Show() {
 
 bool Coroutine::IsAlive() { return machine_.IdExists(id_); }
 
+void Coroutine::CallNonTemplate(Coroutine &callee) {
+  // Start the callee running if it's not already running.  If it's running
+  // we trigger its event to wake it up.
+  if (callee.state_ == State::kCoNew) {
+    callee.Start();
+  } else {
+    callee.TriggerEvent();
+  }
+  state_ = State::kCoYielded;
+  last_tick_ = machine_.TickCount();
+  if (setjmp(resume_) == 0) {
+    longjmp(machine_.YieldBuf(), 1);
+    // Never get here.
+  }
+  // When we get here, the callee has done its work.  Remove this coroutine's
+  // state from it.
+  callee.caller_ = nullptr;
+}
+
 void Coroutine::Yield() {
   state_ = State::kCoYielded;
   yielded_address_ = __builtin_return_address(0);
@@ -288,6 +307,23 @@ void Coroutine::Yield() {
   // are not waiting for anything and there is no yield with timeout
   // since the coroutine is automatically rescheduled.  If you want to
   // sleep, use the various Sleep functions.
+}
+
+void Coroutine::YieldNonTemplate() {
+  if (caller_ != nullptr) {
+    // Tell caller that there's a value available.
+    caller_->TriggerEvent();
+  }
+
+  // Yield control to another coroutine but don't trigger a wakup event.
+  // This will be done when another call is made.
+  state_ = State::kCoYielded;
+  last_tick_ = machine_.TickCount();
+  if (setjmp(resume_) == 0) {
+    longjmp(machine_.YieldBuf(), 1);
+    // Never get here.
+  }
+  // We get here when resumed from another call.
 }
 
 void Coroutine::InvokeFunctor() { functor_(this); }

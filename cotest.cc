@@ -11,14 +11,14 @@ using namespace co;
 int pipes[2];
 
 void Co1(Coroutine *c) {
-  Coroutine generator(c->Machine(), [](Coroutine *c) {
+  Generator<int> generator(c->Machine(), [](Generator<int> *c) {
     for (int i = 1; i < 5; i++) {
       c->YieldValue(i);
     }
   });
 
   while (generator.IsAlive()) {
-    int value = c->Call<int>(generator);
+    int value = c->Call(generator);
     if (generator.IsAlive()) {
       printf("Value: %d\n", value);
       c->Millisleep(1000);

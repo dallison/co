@@ -20,15 +20,21 @@ namespace co {
 
 class CoroutineMachine;
 class Coroutine;
+template <typename T> class Generator;
 
 using CoroutineFunctor = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine *)>;
+
+template <typename T>
+using GeneratorFunctor = std::function<void(Generator<T> *)>;
 
 constexpr size_t kCoDefaultStackSize = 32 * 1024;
 
 extern "C" {
 void __co_Invoke(class Coroutine *c);
 }
+
+template <typename T> class Generator;
 
 // This is a Coroutine.  It executes its functor (pointer to a function
 // or a lambda).
@@ -52,12 +58,7 @@ public:
   void Yield();
 
   // Call another coroutine and store the result.
-  template <typename T>
-  T Call(Coroutine &callee);
-
-  // Yield control and store value.
-  template <typename T>
-  void YieldValue(const T& value);
+  template <typename T> T Call(Generator<T> &callee);
 
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
@@ -114,6 +115,8 @@ private:
     kCoDead,
   };
   friend class CoroutineMachine;
+  template <typename T> friend class Generator;
+
   friend void __co_Invoke(Coroutine *c);
   void InvokeFunctor();
   int EndOfWait(int timer_fd, int result);
@@ -124,6 +127,8 @@ private:
   void Resume(int value);
   void TriggerEvent();
   void ClearEvent();
+  void CallNonTemplate(Coroutine& c);
+  void YieldNonTemplate();
 
   CoroutineMachine &machine_;
   size_t id_;                // Coroutine ID.
@@ -138,9 +143,30 @@ private:
   struct pollfd event_fd_;              // Pollfd for event.
   std::vector<struct pollfd> wait_fds_; // Pollfds for waiting for an fd.
   Coroutine *caller_ = nullptr;         // If being called, who is calling us.
-  void *result_ = nullptr;              // Where to put result in YieldValue.
   void *user_data_;                     // User data, not owned by this.
   uint64_t last_tick_ = 0;              // Tick count of last resume.
+};
+
+// A Generator is a coroutine that generates values.  The magic lamda line
+// noise is because you can't cast an std::function<void(B*)> to an
+// std::function<void(A*)> even though B is derived from A.
+template <typename T> class Generator : public Coroutine {
+public:
+  Generator(CoroutineMachine &machine, GeneratorFunctor<T> functor,
+            const char *name = nullptr, bool autostart = true,
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
+      : Coroutine(machine, [this](Coroutine *c) {
+                    gen_functor_(reinterpret_cast<Generator<T>*>(c));
+                  },
+                  name, autostart, stack_size, user_data), gen_functor_(functor) {}
+
+  // Yield control and store value.
+  void YieldValue(const T &value);
+
+private:
+  friend class Coroutine;
+  GeneratorFunctor<T> gen_functor_;
+  T *result_ = nullptr;              // Where to put result in YieldValue.
 };
 
 struct PollState {
@@ -173,7 +199,7 @@ public:
   // Print the state of all the coroutines to stderr.
   void Show();
 
-  // Call the given function when a coroutine exits. 
+  // Call the given function when a coroutine exits.
   // You can use this to delete the coroutine.
   void SetCompletionCallback(CompletionCallback callback) {
     completion_callback_ = callback;
@@ -181,13 +207,14 @@ public:
 
 private:
   friend class Coroutine;
+  template <typename T> friend class Generator;
   struct ChosenCoroutine {
     ChosenCoroutine() = default;
     ChosenCoroutine(Coroutine *c, int f) : co(c), fd(f) {}
     Coroutine *co = nullptr;
     int fd = 0x12345678;
   };
-  
+
   void BuildPollFds(PollState *poll_state);
   ChosenCoroutine ChooseRunnable(PollState *poll_state, int num_ready);
 
@@ -209,51 +236,21 @@ private:
   CompletionCallback completion_callback_;
 };
 
-template <typename T>
-inline void Coroutine::YieldValue(const T& value) {
+template <typename T> inline void Generator<T>::YieldValue(const T &value) {
   // Copy value.
   if (result_ != nullptr) {
-    memcpy(result_, &value, sizeof(value));
+    *result_ = value;
   }
-  if (caller_ != nullptr) {
-    // Tell caller that there's a value available.
-    caller_->TriggerEvent();
-  }
-
-  // Yield control to another coroutine but don't trigger a wakup event.
-  // This will be done when another call is made.
-  state_ = State::kCoYielded;
-  last_tick_ = machine_.TickCount();
-  if (setjmp(resume_) == 0) {
-    longjmp(machine_.YieldBuf(), 1);
-    // Never get here.
-  }
-  // We get here when resumed from another call.
+  YieldNonTemplate();
 }
 
-template <typename T>
-inline T Coroutine::Call(Coroutine &callee) {
+template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
   T result;
   // Tell the callee that it's being called and where to store the value.
   callee.caller_ = this;
   callee.result_ = &result;
-
-  // Start the callee running if it's not already running.  If it's running
-  // we trigger its event to wake it up.
-  if (callee.state_ == State::kCoNew) {
-    callee.Start();
-  } else {
-    callee.TriggerEvent();
-  }
-  state_ = State::kCoYielded;
-  last_tick_ = machine_.TickCount();
-  if (setjmp(resume_) == 0) {
-    longjmp(machine_.YieldBuf(), 1);
-    // Never get here.
-  }
-  // When we get here, the callee has done its work.  Remove this coroutine's
-  // state from it.
-  callee.caller_ = nullptr;
+  CallNonTemplate(callee);
+  // Call done.  No result now.
   callee.result_ = nullptr;
   return result;
 }
