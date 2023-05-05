@@ -390,11 +390,12 @@ WORKSPACE entry can be used to import it into another Bazel-built system:
 ```
 http_archive(
   name = "coroutines",
-  urls = ["https://github.com/dallison/cocpp/archive/refs/tags/1.2.0.tar.gz"],
-  strip_prefix = "cocpp-1.2.0",
-  sha256 = "831c8c9e844822f58da2b3263b42f162b5efef88a4b85f08bf3a02861d264a63"
+  urls = ["https://github.com/dallison/cocpp/archive/refs/tags/1.2.1.tar.gz"],
+  strip_prefix = "cocpp-1.2.1",
 )
 
+You can add a *sha256* entry to make sure you get the right version.  Bazel
+will tell you what it is.
 ```
 
 # Portability
