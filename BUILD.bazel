@@ -28,3 +28,11 @@ cc_binary(
         ":co",
     ]
 )
+
+cc_binary(
+    name = "costress",
+    srcs = ["costress.cc"],
+    deps = [
+        ":co",
+    ]
+)
