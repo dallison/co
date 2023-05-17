@@ -5,15 +5,16 @@
 #ifndef __BITSET_H
 #define __BITSET_H
 
-#include <vector>
-#include <cstdlib>
-#include <cstddef>
 #include <strings.h>
+
+#include <cstddef>
+#include <cstdlib>
+#include <vector>
 
 namespace co {
 
 class BitSet {
-public:
+ public:
   // Allocate the first free bit.
   int Allocate();
 
@@ -29,7 +30,7 @@ public:
   // Is the given bit set?
   bool Contains(size_t bit) const;
 
-private:
+ private:
   // Note the use of explicit long long type here because
   // we use ffsll to look for the set bits and that is
   // explicit in its use of long long.
@@ -90,5 +91,5 @@ inline bool BitSet::Contains(size_t bit) const {
   int b = bit % 64;
   return (bits_[word] & (1 << b)) != 0;
 }
-} // namespace co
-#endif // __BITSET_H
+}  // namespace co
+#endif  // __BITSET_H

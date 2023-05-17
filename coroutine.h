@@ -5,22 +5,25 @@
 #ifndef coroutine_h
 #define coroutine_h
 
-#include "bitset.h"
+#include <poll.h>
+
 #include <csetjmp>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <functional>
 #include <list>
-#include <poll.h>
 #include <string>
 #include <vector>
+
+#include "bitset.h"
 
 namespace co {
 
 class CoroutineScheduler;
 class Coroutine;
-template <typename T> class Generator;
+template <typename T>
+class Generator;
 
 using CoroutineFunction = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine *)>;
@@ -34,7 +37,8 @@ extern "C" {
 void __co_Invoke(class Coroutine *c);
 }
 
-template <typename T> class Generator;
+template <typename T>
+class Generator;
 
 // This is a Coroutine.  It executes its function (pointer to a function
 // or a lambda).
@@ -44,7 +48,7 @@ template <typename T> class Generator;
 // be started automatically.  It can have some user data which is
 // not owned by the coroutine.
 class Coroutine {
-public:
+ public:
   Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
             const char *name = nullptr, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
@@ -58,7 +62,8 @@ public:
   void Yield();
 
   // Call another coroutine and store the result.
-  template <typename T> T Call(Generator<T> &callee);
+  template <typename T>
+  T Call(Generator<T> &callee);
 
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
@@ -105,7 +110,7 @@ public:
   // Each coroutine has a unique id.
   int64_t Id() const { return id_; }
 
-private:
+ private:
   enum class State {
     kCoNew,
     kCoReady,
@@ -115,7 +120,8 @@ private:
     kCoDead,
   };
   friend class CoroutineScheduler;
-  template <typename T> friend class Generator;
+  template <typename T>
+  friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
   void InvokeFunction();
@@ -127,24 +133,24 @@ private:
   void Resume(int value);
   void TriggerEvent();
   void ClearEvent();
-  void CallNonTemplate(Coroutine& c);
+  void CallNonTemplate(Coroutine &c);
   void YieldNonTemplate();
 
   CoroutineScheduler &scheduler_;
-  size_t id_;                // Coroutine ID.
-  CoroutineFunction function_; // Coroutine body.
-  std::string name_;         // Optional name.
+  size_t id_;                   // Coroutine ID.
+  CoroutineFunction function_;  // Coroutine body.
+  std::string name_;            // Optional name.
   State state_;
-  void *stack_;                     // Stack, allocated from malloc.
-  void *yielded_address_ = nullptr; // Address at which we've yielded.
+  void *stack_;                      // Stack, allocated from malloc.
+  void *yielded_address_ = nullptr;  // Address at which we've yielded.
   size_t stack_size_;
-  jmp_buf resume_;                      // Program environemnt for resuming.
-  jmp_buf exit_;                        // Program environemt to exit.
-  struct pollfd event_fd_;              // Pollfd for event.
-  std::vector<struct pollfd> wait_fds_; // Pollfds for waiting for an fd.
-  Coroutine *caller_ = nullptr;         // If being called, who is calling us.
-  void *user_data_;                     // User data, not owned by this.
-  uint64_t last_tick_ = 0;              // Tick count of last resume.
+  jmp_buf resume_;                       // Program environemnt for resuming.
+  jmp_buf exit_;                         // Program environemt to exit.
+  struct pollfd event_fd_;               // Pollfd for event.
+  std::vector<struct pollfd> wait_fds_;  // Pollfds for waiting for an fd.
+  Coroutine *caller_ = nullptr;          // If being called, who is calling us.
+  void *user_data_;                      // User data, not owned by this.
+  uint64_t last_tick_ = 0;               // Tick count of last resume.
 };
 
 // A Generator is a coroutine that generates values.  The magic lamda line
@@ -153,23 +159,27 @@ private:
 //
 // A generator doesn't start automatically.  It's started on the
 // first call.
-template <typename T> class Generator : public Coroutine {
-public:
+template <typename T>
+class Generator : public Coroutine {
+ public:
   Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
-            const char *name = nullptr,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(machine, [this](Coroutine *c) {
-                    gen_function_(reinterpret_cast<Generator<T>*>(c));
-                  },
-                  name, /*autostart=*/false, stack_size, user_data), gen_function_(function) {}
+            const char *name = nullptr, size_t stack_size = kCoDefaultStackSize,
+            void *user_data = nullptr)
+      : Coroutine(
+            machine,
+            [this](Coroutine *c) {
+              gen_function_(reinterpret_cast<Generator<T> *>(c));
+            },
+            name, /*autostart=*/false, stack_size, user_data),
+        gen_function_(function) {}
 
   // Yield control and store value.
   void YieldValue(const T &value);
 
-private:
+ private:
   friend class Coroutine;
   GeneratorFunction<T> gen_function_;
-  T *result_ = nullptr;              // Where to put result in YieldValue.
+  T *result_ = nullptr;  // Where to put result in YieldValue.
 };
 
 struct PollState {
@@ -178,7 +188,7 @@ struct PollState {
 };
 
 class CoroutineScheduler {
-public:
+ public:
   CoroutineScheduler();
   ~CoroutineScheduler();
 
@@ -208,9 +218,10 @@ public:
     completion_callback_ = callback;
   }
 
-private:
+ private:
   friend class Coroutine;
-  template <typename T> friend class Generator;
+  template <typename T>
+  friend class Generator;
   struct ChosenCoroutine {
     ChosenCoroutine() = default;
     ChosenCoroutine(Coroutine *c, int f) : co(c), fd(f) {}
@@ -230,7 +241,6 @@ private:
   std::list<Coroutine *> coroutines_;
   BitSet coroutine_ids_;
   ssize_t last_freed_coroutine_id_ = -1;
-  std::vector<ChosenCoroutine> ready_coroutines_;
   jmp_buf yield_;
   bool running_ = false;
   PollState poll_state_;
@@ -239,7 +249,8 @@ private:
   CompletionCallback completion_callback_;
 };
 
-template <typename T> inline void Generator<T>::YieldValue(const T &value) {
+template <typename T>
+inline void Generator<T>::YieldValue(const T &value) {
   // Copy value.
   if (result_ != nullptr) {
     *result_ = value;
@@ -247,7 +258,8 @@ template <typename T> inline void Generator<T>::YieldValue(const T &value) {
   YieldNonTemplate();
 }
 
-template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
+template <typename T>
+inline T Coroutine::Call(Generator<T> &callee) {
   T result;
   // Tell the callee that it's being called and where to store the value.
   callee.caller_ = this;
@@ -258,5 +270,5 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
   return result;
 }
 
-} // namespace co
+}  // namespace co
 #endif /* coroutine_h */

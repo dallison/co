@@ -3,10 +3,13 @@
 // See LICENSE file for licensing information.
 
 #include "coroutine.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 #include <algorithm>
+
 #include "bitset.h"
 
 #if defined(__APPLE__)
@@ -92,6 +95,10 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
   }
   state_ = State::kCoNew;
   event_fd_.fd = NewEventFd();
+  if (event_fd_.fd == -1) {
+    fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
+    abort();
+  }
   event_fd_.events = POLLIN;
 
   // Might as well take the hit for allocating the pollfd vector when the
@@ -477,27 +484,30 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 // same priority.
 CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
     PollState *poll_state, int num_ready) {
-  ready_coroutines_.clear();
-  ready_coroutines_.reserve(num_ready);
+  // Find the ready coroutine with the highest time waiting.
+  // We need to process all ready coroutines once to choose the
+  // one to run.
+  // Worst case is that all coroutines are ready, which means we
+  // need O(n) complexity.  We can't avoid processing all the ready
+  // coroutines so we only do it once rather than inserting them into
+  // a data structure and processing it afterwards.
+  Coroutine *chosen = nullptr;
+  int chosen_fd;
+  uint64_t max_wait;
   for (size_t i = 1; i < poll_state->pollfds.size(); i++) {
     struct pollfd *fd = &poll_state->pollfds[i];
-    if (fd->revents != 0) {
-      ready_coroutines_.emplace_back(poll_state->coroutines[i - 1], fd->fd);
+    Coroutine *co = poll_state->coroutines[i - 1];
+    uint64_t wait_time = tick_count_ - co->LastTick();
+    if (fd->revents != 0 && (chosen == nullptr || wait_time > max_wait)) {
+      chosen = co;
+      chosen_fd = fd->fd;
+      max_wait = wait_time;
     }
   }
-  if (ready_coroutines_.empty()) {
-    // Only interrrupt set with no coroutines ready.
+  if (chosen == nullptr) {
     return ChosenCoroutine();
   }
-
-  // Sort in descending order of time waiting.
-  std::sort(ready_coroutines_.begin(), ready_coroutines_.end(),
-            [](const ChosenCoroutine &c1, const ChosenCoroutine &c2) {
-              uint64_t t1 = c1.co->Scheduler().TickCount() - c1.co->LastTick();
-              uint64_t t2 = c2.co->Scheduler().TickCount() - c2.co->LastTick();
-              return t1 >= t2;
-            });
-  return ready_coroutines_[0];
+  return ChosenCoroutine(chosen, chosen_fd);
 }
 
 CoroutineScheduler::ChosenCoroutine CoroutineScheduler::GetRunnableCoroutine(
@@ -566,7 +576,9 @@ void CoroutineScheduler::ProcessPoll(PollState *poll_state) {
   }
 }
 
-void CoroutineScheduler::AddCoroutine(Coroutine *c) { coroutines_.push_back(c); }
+void CoroutineScheduler::AddCoroutine(Coroutine *c) {
+  coroutines_.push_back(c);
+}
 
 // Removes a coroutine but doesn't destruct it.  The coroutines's id will
 // be removed and can be reused immediately after the completion callback
