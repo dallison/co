@@ -11,14 +11,6 @@ cc_library(
    ],
    deps = [
    ],
-   copts = [
-     # _FORTIFY_SOURCE causes calls to longjmp to be replaced
-     # by __longjmp_chk which doesn't allow us to move the stack
-     # around.  Seems to only be on Linux.  If we allow this
-     # option as default we get an abort with:
-     # "longjmp causes uninitialized stack frame"
-     "-U_FORTIFY_SOURCE",
-   ],
 )
 
 cc_binary(

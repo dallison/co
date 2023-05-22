@@ -34,6 +34,7 @@ using GeneratorFunction = std::function<void(Generator<T> *)>;
 constexpr size_t kCoDefaultStackSize = 32 * 1024;
 
 extern "C" {
+// This is needed here because it's a friend with C linkage.
 void __co_Invoke(class Coroutine *c);
 }
 

@@ -71,6 +71,42 @@ static void ClearEvent(int fd) {
 #endif
 }
 
+
+extern "C" {
+// Linux, when building optimized ever-so-helpfully replaces
+// longjmp with longjmp_chk unless _FORTIFY_SOURCE is not defined.
+// We are using longjmp for context switches so the checks done
+// by longjmp_chk break everything.  We could force the undef
+// of _FORTIFY_SOURCE but that seems fragile.  It's better to
+// stay out of the compiler's way and just call the function we
+// really want directly to avoid any shenanigans.
+void __real_longjmp(jmp_buf, int);
+}
+
+// Apple puts an underscore prefix for all external symbols.
+#if defined(__APPLE__)
+#define STRSYM(name) #name
+#define SYM(name) STRSYM(_##name)
+#else
+#define SYM(name) #name
+#endif
+
+// Define __real_longjmp as a simple relay function that jumps
+// to the real longjmp function.
+#if defined(__aarch64__)
+asm(SYM(__real_longjmp) ":\n"
+    "b " SYM(longjmp) "\n"
+);
+#elif defined(__x86_64__)
+asm(SYM(__real_longjmp) ":\n"
+    "jmp " SYM(longjmp) "\n"
+);
+#else
+#error "Unsupported architecture"
+#endif
+
+
+
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
                      const char *name, bool autostart, size_t stack_size,
                      void *user_data)
@@ -118,7 +154,7 @@ Coroutine::~Coroutine() {
   CloseEventFd(event_fd_.fd);
 }
 
-void Coroutine::Exit() { longjmp(exit_, 1); }
+void Coroutine::Exit() { __real_longjmp(exit_, 1); }
 
 void Coroutine::Start() {
   if (state_ == State::kCoNew) {
@@ -188,7 +224,7 @@ int Coroutine::Wait(int fd, short event_mask, int64_t timeout_ns) {
   last_tick_ = scheduler_.TickCount();
   int result = -1;
   if ((result = setjmp(resume_)) == 0) {
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
   }
   // Get here when resumed.
   return EndOfWait(timer_fd, result);
@@ -202,7 +238,7 @@ int Coroutine::Wait(struct pollfd &fd, int64_t timeout_ns) {
   last_tick_ = scheduler_.TickCount();
   int result = -1;
   if ((result = setjmp(resume_)) == 0) {
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
   }
   // Get here when resumed.
   return EndOfWait(timer_fd, result);
@@ -218,7 +254,7 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds, int64_t timeout_ns) {
   last_tick_ = scheduler_.TickCount();
   int result = -1;
   if ((result = setjmp(resume_)) == 0) {
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
   }
   // Get here when resumed.
   return EndOfWait(timer_fd, result);
@@ -293,7 +329,7 @@ void Coroutine::CallNonTemplate(Coroutine &callee) {
   state_ = State::kCoYielded;
   last_tick_ = scheduler_.TickCount();
   if (setjmp(resume_) == 0) {
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
   }
   // When we get here, the callee has done its work.  Remove this coroutine's
@@ -307,7 +343,7 @@ void Coroutine::Yield() {
   last_tick_ = scheduler_.TickCount();
   if (setjmp(resume_) == 0) {
     TriggerEvent();
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
   }
   // We get here when resumed.  We ignore the result of setjmp as we
@@ -327,7 +363,7 @@ void Coroutine::YieldNonTemplate() {
   state_ = State::kCoYielded;
   last_tick_ = scheduler_.TickCount();
   if (setjmp(resume_) == 0) {
-    longjmp(scheduler_.YieldBuf(), 1);
+    __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
   }
   // We get here when resumed from another call.
@@ -366,20 +402,12 @@ void Coroutine::Resume(int value) {
             "stp x12, x13, [sp, #16]\n"
             "str %1, [sp, #0]\n"  // Save exit state to stack.
             "mov x0, %2\n"
-#if defined(__APPLE__)
-            "bl ___co_Invoke\n"
-#else
-            "bl __co_Invoke\n"
-#endif
+            "bl " SYM(__co_Invoke) "\n"
             "ldr x0, [sp, #0]\n"  // Restore exit state.
             "ldp x12, x29, [sp, #16]\n"
             "mov sp, x12\n"  // Restore stack pointer
             "mov w1, #1\n"
-#if defined(__APPLE__)
-            "bl _longjmp\n"
-#else
-            "bl longjmp\n"
-#endif
+            "bl " SYM(longjmp) "\n"
             :
             : "r"(sp), "r"(exit_state), "r"(this)
             : "x12", "x13");
@@ -393,25 +421,16 @@ void Coroutine::Resume(int value) {
           "pushq %1\n"       // Push env
           "subq $8, %%rsp\n" // Align to 16
           "movq %2, %%rdi\n" // this
-#if defined(__APPLE__)
-          "call ___co_Invoke\n"
-#else
-            "call __co_Invoke\n"
-#endif
+          "call " SYM(__co_Invoke) "\n"
           "addq $8, %%rsp\n" // Remove alignment.
           "popq %%rdi\n"     // Pop env
           "popq %%rbp\n"
           "popq %%rsp\n"
-          "movl $1, %%esi\n"
-#if defined(__APPLE__)
-          "call _longjmp\n"
-#else
-            "call longjmp\n"
+          "movl $1, %%esi\n"\
+          "call " SYM(longjmp) "\n"
             :
             : "r"(sp), "r"(exit_state), "r"(this)
             : "%r14", "%r15");
-#endif
-
 #else
 #error "Unknown architecture"
 #endif
@@ -437,14 +456,14 @@ void Coroutine::Resume(int value) {
       if (value == -1) {
         value = 0;
       }
-      longjmp(resume_, ~value);
+      __real_longjmp(resume_, ~value);
       break;
     case State::kCoRunning:
     case State::kCoNew:
       // Should never get here.
       break;
     case State::kCoDead:
-      longjmp(exit_, 1);
+      __real_longjmp(exit_, 1);
       break;
   }
 }
