@@ -72,50 +72,57 @@ void TestWaitWithTimeout(Coroutine *c) {
   // Waits for a single fd with a timeout.
   auto wait1_func = [wait1_end](Coroutine *c) {
     printf("Waiter %s waiting\n", c->Name().c_str());
-    int fd = c->Wait(wait1_end, POLLIN, 1000000000);  // Wait 1 second.
+    int fd = c->Wait(wait1_end, POLLIN, 1000000000); // Wait 1 second.
     if (fd == -1) {
       printf("Waiter %s resumed due to timeout\n", c->Name().c_str());
     } else if (fd == wait1_end) {
       printf("Waiter %s resumed due to input ready\n", c->Name().c_str());
       char buf[1];
-      (void)read(fd, buf, 1);  // Clear pipe.
+      (void)read(fd, buf, 1); // Clear pipe.
     } else {
       printf("Waiter %s resumed due to unknown value %d\n", c->Name().c_str(),
              fd);
+      abort();
     }
   };
 
   // Waits for multiple fds with timeout.
   auto wait2_func = [wait2_end, wait3_end](Coroutine *c) {
-    printf("Waiter %s waiting\n", c->Name().c_str());
+    printf("Waiter %s waiting %d %d\n", c->Name().c_str(), wait2_end,
+           wait3_end);
     struct pollfd fd1 = {.fd = wait2_end, .events = POLLIN};
     struct pollfd fd2 = {.fd = wait3_end, .events = POLLIN};
-    int fd = c->Wait({fd1, fd2}, 1000000000);  // Wait 1 second.
+    int fd = c->Wait({fd1, fd2}, 1000000000); // Wait 1 second.
     if (fd == -1) {
       printf("Waiter %s resumed due to timeout\n", c->Name().c_str());
     } else if (fd == wait3_end) {
       printf("Waiter %s resumed due to input ready\n", c->Name().c_str());
       char buf[1];
-      (void)read(fd, buf, 1);  // Clear pipe.
+      (void)read(fd, buf, 1); // Clear pipe.
     } else {
-      printf("Waiter %s resumed due to unknown value %d\n", c->Name().c_str(),
-             fd);
+      printf("Waiter %s resumed due to unknown value %d (expected %d)\n",
+             c->Name().c_str(), fd, wait3_end);
+      abort();
     }
   };
 
   Coroutine waiter1(c->Scheduler(), wait1_func, "waiter1");
-  c->Sleep(2);  // Cause timeout in waiter1.
+  c->Sleep(2); // Cause timeout in waiter1.
 
   Coroutine waiter2(c->Scheduler(), wait1_func, "waiter2");
   // Trigger waiter2.
   (void)write(trigger1_end, "x", 1);
 
   Coroutine waiter3(c->Scheduler(), wait2_func, "waiter3");
-  c->Sleep(2);  // Cause timeout in waiter3.
+  c->Sleep(2); // Cause timeout in waiter3.
 
   Coroutine waiter4(c->Scheduler(), wait2_func, "waiter4");
   // Trigger waiter4.
   (void)write(trigger3_end, "x", 1);
+
+  // Allow waiter4 to receive trigger before closing the wait2
+  // pipe.
+  c->Sleep(1);
 
   // Don't forget to tidy up.
   close(wait1_end);
