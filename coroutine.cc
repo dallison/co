@@ -92,15 +92,19 @@ void __real_longjmp(jmp_buf, int);
 
 // Define __real_longjmp as a simple relay function that jumps
 // to the real longjmp function.
+// clang-format off
 #if defined(__aarch64__)
-asm(SYM(__real_longjmp) ":\n"
-                        "b " SYM(longjmp) "\n");
+asm(
+  SYM(__real_longjmp) ":\n"
+  "b " SYM(longjmp) "\n");
 #elif defined(__x86_64__)
-asm(SYM(__real_longjmp) ":\n"
-                        "jmp " SYM(longjmp) "\n");
+asm(
+  SYM(__real_longjmp) ":\n"
+  "jmp " SYM(longjmp) "\n");
 #else
 #error "Unsupported architecture"
 #endif
+// clang-format on
 
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
                      const char *name, bool autostart, size_t stack_size,
@@ -402,6 +406,7 @@ void Coroutine::Resume(int value) {
       void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
       jmp_buf &exit_state = exit_;
 
+// clang-format off
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
@@ -410,11 +415,11 @@ void Coroutine::Resume(int value) {
           "str %1, [sp, #0]\n" // Save exit state to stack.
           "mov x0, %2\n"
           "bl " SYM(__co_Invoke) "\n"
-                                 "ldr x0, [sp, #0]\n" // Restore exit state.
-                                 "ldp x12, x29, [sp, #16]\n"
-                                 "mov sp, x12\n" // Restore stack pointer
-                                 "mov w1, #1\n"
-                                 "bl " SYM(longjmp) "\n"
+          "ldr x0, [sp, #0]\n" // Restore exit state.
+          "ldp x12, x29, [sp, #16]\n"
+          "mov sp, x12\n" // Restore stack pointer
+          "mov w1, #1\n"
+          "bl " SYM(longjmp) "\n"
           :
           : "r"(sp), "r"(exit_state), "r"(this)
           : "x12", "x13");
@@ -429,18 +434,19 @@ void Coroutine::Resume(int value) {
           "subq $8, %%rsp\n" // Align to 16
           "movq %2, %%rdi\n" // this
           "call " SYM(__co_Invoke) "\n"
-                                   "addq $8, %%rsp\n" // Remove alignment.
-                                   "popq %%rdi\n"     // Pop env
-                                   "popq %%rbp\n"
-                                   "popq %%rsp\n"
-                                   "movl $1, %%esi\n"
-                                   "call " SYM(longjmp) "\n"
+          "addq $8, %%rsp\n" // Remove alignment.
+          "popq %%rdi\n"     // Pop env
+          "popq %%rbp\n"
+          "popq %%rsp\n"
+          "movl $1, %%esi\n"
+          "call " SYM(longjmp) "\n"
           :
           : "r"(sp), "r"(exit_state), "r"(this)
           : "%r14", "%r15");
 #else
 #error "Unknown architecture"
 #endif
+      // clang-format on
     }
     // Trigger the caller when we exit.
     if (caller_ != nullptr) {
