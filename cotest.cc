@@ -30,9 +30,9 @@ void Co1(Coroutine *c) {
 void Writer(Coroutine *c) {
   for (int i = 0; i < 20; i++) {
     char buf[256];
-    size_t n = snprintf(buf, sizeof(buf), "FOO %d\n", i);
+    int n = snprintf(buf, sizeof(buf), "FOO %d\n", i);
     c->Wait(pipes[1], POLLOUT);
-    (void)write(pipes[1], buf, n);
+    (void)write(pipes[1], buf, static_cast<size_t>(n));
     // Yield here so that all the writes don't go at once.
     c->Yield();
   }

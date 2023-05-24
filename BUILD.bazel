@@ -11,6 +11,9 @@ cc_library(
    ],
    deps = [
    ],
+   copts = [
+    "-Wall",
+   ]
 )
 
 cc_binary(

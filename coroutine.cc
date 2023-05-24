@@ -49,7 +49,7 @@ static void TriggerEvent(int fd) {
 #if defined(__APPLE__)
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, 0, 0, 0);  // Trigger USER event
+  kevent(fd, &e, 1, 0, 0, 0); // Trigger USER event
 #elif defined(__linux__)
   int64_t val = 1;
   (void)write(fd, &val, 8);
@@ -62,7 +62,7 @@ static void ClearEvent(int fd) {
 #if defined(__APPLE__)
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, nullptr, 0, 0);  // Clear USER event
+  kevent(fd, &e, 1, nullptr, 0, 0); // Clear USER event
 #elif defined(__linux__)
   int64_t val;
   (void)read(fd, &val, 8);
@@ -70,7 +70,6 @@ static void ClearEvent(int fd) {
 #error "Unknown operating system"
 #endif
 }
-
 
 extern "C" {
 // Linux, when building optimized ever-so-helpfully replaces
@@ -95,29 +94,23 @@ void __real_longjmp(jmp_buf, int);
 // to the real longjmp function.
 #if defined(__aarch64__)
 asm(SYM(__real_longjmp) ":\n"
-    "b " SYM(longjmp) "\n"
-);
+                        "b " SYM(longjmp) "\n");
 #elif defined(__x86_64__)
 asm(SYM(__real_longjmp) ":\n"
-    "jmp " SYM(longjmp) "\n"
-);
+                        "jmp " SYM(longjmp) "\n");
 #else
 #error "Unsupported architecture"
 #endif
 
-
-
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
                      const char *name, bool autostart, size_t stack_size,
                      void *user_data)
-    : scheduler_(machine),
-      function_(std::move(functor)),
-      stack_size_(stack_size),
-      user_data_(user_data) {
+    : scheduler_(machine), function_(std::move(functor)),
+      stack_size_(stack_size), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name == nullptr) {
     char buf[256];
-    snprintf(buf, sizeof(buf), "co-%zd", id_);
+    snprintf(buf, sizeof(buf), "co-%d", id_);
     name_ = buf;
   } else {
     name_ = name;
@@ -205,7 +198,7 @@ int Coroutine::EndOfWait(int timer_fd, int result) {
   return result;
 }
 
-int Coroutine::AddTimeout(int64_t timeout_ns) {
+int Coroutine::AddTimeout(uint64_t timeout_ns) {
   int timer_fd = -1;
   if (timeout_ns > 0) {
     timer_fd = MakeTimer(timeout_ns);
@@ -215,7 +208,7 @@ int Coroutine::AddTimeout(int64_t timeout_ns) {
   return timer_fd;
 }
 
-int Coroutine::Wait(int fd, short event_mask, int64_t timeout_ns) {
+int Coroutine::Wait(int fd, short event_mask, uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   struct pollfd pfd = {.fd = fd, .events = event_mask};
   wait_fds_.push_back(pfd);
@@ -230,7 +223,7 @@ int Coroutine::Wait(int fd, short event_mask, int64_t timeout_ns) {
   return EndOfWait(timer_fd, result);
 }
 
-int Coroutine::Wait(struct pollfd &fd, int64_t timeout_ns) {
+int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   wait_fds_.push_back(fd);
   int timer_fd = AddTimeout(timeout_ns);
@@ -244,7 +237,8 @@ int Coroutine::Wait(struct pollfd &fd, int64_t timeout_ns) {
   return EndOfWait(timer_fd, result);
 }
 
-int Coroutine::Wait(const std::vector<struct pollfd> &fds, int64_t timeout_ns) {
+int Coroutine::Wait(const std::vector<struct pollfd> &fds,
+                    uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   for (auto &fd : fds) {
     wait_fds_.push_back(fd);
@@ -273,50 +267,63 @@ void Coroutine::ClearEvent() { co::ClearEvent(event_fd_.fd); }
 void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
                            std::vector<Coroutine *> &covec) {
   switch (state_) {
-    case State::kCoReady:
-    case State::kCoYielded:
-      pollfds.push_back(event_fd_);
+  case State::kCoReady:
+  case State::kCoYielded:
+    pollfds.push_back(event_fd_);
+    covec.push_back(this);
+    break;
+  case State::kCoWaiting:
+    for (auto &fd : wait_fds_) {
+      pollfds.push_back(fd);
       covec.push_back(this);
-      break;
-    case State::kCoWaiting:
-      for (auto &fd : wait_fds_) {
-        pollfds.push_back(fd);
-        covec.push_back(this);
-      }
-    case State::kCoNew:
-    case State::kCoRunning:
-    case State::kCoDead:
-      break;
+    }
+  case State::kCoNew:
+  case State::kCoRunning:
+  case State::kCoDead:
+    break;
   }
 }
 
-void Coroutine::Show() {
+std::string Coroutine::ToString() const {
+  if (IsAlive() && to_string_callback_ != nullptr) {
+    return to_string_callback_();
+  }
+  return MakeDefaultString();
+}
+
+std::string Coroutine::MakeDefaultString() const {
   const char *state = "unknown";
   switch (state_) {
-    case State::kCoNew:
-      state = "new";
-      break;
-    case State::kCoDead:
-      state = "dead";
-      break;
-    case State::kCoReady:
-      state = "ready";
-      break;
-    case State::kCoRunning:
-      state = "runnning";
-      break;
-    case State::kCoWaiting:
-      state = "waiting";
-      break;
-    case State::kCoYielded:
-      state = "yielded";
-      break;
+  case State::kCoNew:
+    state = "new";
+    break;
+  case State::kCoDead:
+    state = "dead";
+    break;
+  case State::kCoReady:
+    state = "ready";
+    break;
+  case State::kCoRunning:
+    state = "runnning";
+    break;
+  case State::kCoWaiting:
+    state = "waiting";
+    break;
+  case State::kCoYielded:
+    state = "yielded";
+    break;
   }
-  fprintf(stderr, "Coroutine %zd: %s: state: %s: address: %p\n", id_,
-          name_.c_str(), state, yielded_address_);
+  char buffer[256];
+  snprintf(buffer, sizeof(buffer), "Coroutine %d: %s: state: %s: address: %p",
+           id_, name_.c_str(), state, yielded_address_);
+  return buffer;
 }
 
-bool Coroutine::IsAlive() { return scheduler_.IdExists(id_); }
+void Coroutine::Show() const {
+  fprintf(stderr, "%s\n", MakeDefaultString().c_str());
+}
+
+bool Coroutine::IsAlive() const { return scheduler_.IdExists(id_); }
 
 void Coroutine::CallNonTemplate(Coroutine &callee) {
   // Start the callee running if it's not already running.  If it's running
@@ -382,89 +389,89 @@ void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 
 void Coroutine::Resume(int value) {
   switch (state_) {
-    case State::kCoReady:
-      // Initial invocation of the coroutine.  We need to do a bit
-      // of magic to switch to the coroutine's stack and invoke
-      // the function using the stack.  When the function returns
-      // we longjmp to the exit environment with the stack restored
-      // to the current one, which is the stack used by the
-      // CoroutineScheduler.
-      state_ = State::kCoRunning;
-      yielded_address_ = nullptr;
-      if (setjmp(exit_) == 0) {
-        void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
-        jmp_buf &exit_state = exit_;
+  case State::kCoReady:
+    // Initial invocation of the coroutine.  We need to do a bit
+    // of magic to switch to the coroutine's stack and invoke
+    // the function using the stack.  When the function returns
+    // we longjmp to the exit environment with the stack restored
+    // to the current one, which is the stack used by the
+    // CoroutineScheduler.
+    state_ = State::kCoRunning;
+    yielded_address_ = nullptr;
+    if (setjmp(exit_) == 0) {
+      void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
+      jmp_buf &exit_state = exit_;
 
 #if defined(__aarch64__)
-        asm("mov x12, sp\n"      // Save current stack pointer.
-            "mov x13, x29\n"     // Save current frame pointer
-            "sub sp, %0, #32\n"  // Set new stack pointer.
-            "stp x12, x13, [sp, #16]\n"
-            "str %1, [sp, #0]\n"  // Save exit state to stack.
-            "mov x0, %2\n"
-            "bl " SYM(__co_Invoke) "\n"
-            "ldr x0, [sp, #0]\n"  // Restore exit state.
-            "ldp x12, x29, [sp, #16]\n"
-            "mov sp, x12\n"  // Restore stack pointer
-            "mov w1, #1\n"
-            "bl " SYM(longjmp) "\n"
-            :
-            : "r"(sp), "r"(exit_state), "r"(this)
-            : "x12", "x13");
+      asm("mov x12, sp\n"     // Save current stack pointer.
+          "mov x13, x29\n"    // Save current frame pointer
+          "sub sp, %0, #32\n" // Set new stack pointer.
+          "stp x12, x13, [sp, #16]\n"
+          "str %1, [sp, #0]\n" // Save exit state to stack.
+          "mov x0, %2\n"
+          "bl " SYM(__co_Invoke) "\n"
+                                 "ldr x0, [sp, #0]\n" // Restore exit state.
+                                 "ldp x12, x29, [sp, #16]\n"
+                                 "mov sp, x12\n" // Restore stack pointer
+                                 "mov w1, #1\n"
+                                 "bl " SYM(longjmp) "\n"
+          :
+          : "r"(sp), "r"(exit_state), "r"(this)
+          : "x12", "x13");
 
 #elif defined(__x86_64__)
       asm("movq %%rsp, %%r14\n" // Save current stack pointer.
           "movq %%rbp, %%r15\n" // Save current frame pointer
-          "movq %0, %%rsp\n"    
+          "movq %0, %%rsp\n"
           "pushq %%r14\n"    // Push rsp
           "pushq %%r15\n"    // Push rbp
           "pushq %1\n"       // Push env
           "subq $8, %%rsp\n" // Align to 16
           "movq %2, %%rdi\n" // this
           "call " SYM(__co_Invoke) "\n"
-          "addq $8, %%rsp\n" // Remove alignment.
-          "popq %%rdi\n"     // Pop env
-          "popq %%rbp\n"
-          "popq %%rsp\n"
-          "movl $1, %%esi\n"\
-          "call " SYM(longjmp) "\n"
-            :
-            : "r"(sp), "r"(exit_state), "r"(this)
-            : "%r14", "%r15");
+                                   "addq $8, %%rsp\n" // Remove alignment.
+                                   "popq %%rdi\n"     // Pop env
+                                   "popq %%rbp\n"
+                                   "popq %%rsp\n"
+                                   "movl $1, %%esi\n"
+                                   "call " SYM(longjmp) "\n"
+          :
+          : "r"(sp), "r"(exit_state), "r"(this)
+          : "%r14", "%r15");
 #else
 #error "Unknown architecture"
 #endif
-      }
-      // Trigger the caller when we exit.
-      if (caller_ != nullptr) {
-        caller_->TriggerEvent();
-      }
-      // Functor returned, we are dead.
-      state_ = State::kCoDead;
-      scheduler_.RemoveCoroutine(this);
-      break;
-    case State::kCoYielded:
-    case State::kCoWaiting:
-      state_ = State::kCoRunning;
-      // We use the onescomp of the result so that we can wait
-      // for standard input (fd 0).  We can't cause setjmp to
-      // return 0 from longjmp.  This means that we can't
-      // use -1 for the value as this would be returned from
-      // setjmp as 1, which is stdout's fd and that would be
-      // confusing.  Better to return something that can't be
-      // a valid fd.
-      if (value == -1) {
-        value = 0;
-      }
-      __real_longjmp(resume_, ~value);
-      break;
-    case State::kCoRunning:
-    case State::kCoNew:
-      // Should never get here.
-      break;
-    case State::kCoDead:
-      __real_longjmp(exit_, 1);
-      break;
+    }
+    // Trigger the caller when we exit.
+    if (caller_ != nullptr) {
+      caller_->TriggerEvent();
+    }
+    // Functor returned, we are dead.
+    state_ = State::kCoDead;
+    scheduler_.RemoveCoroutine(this);
+    break;
+  case State::kCoYielded:
+  case State::kCoWaiting:
+    state_ = State::kCoRunning;
+    // We use the onescomp of the result so that we can wait
+    // for standard input (fd 0).  We can't cause setjmp to
+    // return 0 from longjmp.  This means that we can't
+    // use -1 for the value as this would be returned from
+    // setjmp as 1, which is stdout's fd and that would be
+    // confusing.  Better to return something that can't be
+    // a valid fd.
+    if (value == -1) {
+      value = 0;
+    }
+    __real_longjmp(resume_, ~value);
+    break;
+  case State::kCoRunning:
+  case State::kCoNew:
+    // Should never get here.
+    break;
+  case State::kCoDead:
+    __real_longjmp(exit_, 1);
+    break;
   }
 }
 
@@ -501,8 +508,8 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 // no two coroutines can have been waiting for the same amount of time.
 // This is a completely fair scheduler with all coroutines given the
 // same priority.
-CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
-    PollState *poll_state, int num_ready) {
+CoroutineScheduler::ChosenCoroutine
+CoroutineScheduler::ChooseRunnable(PollState *poll_state, int num_ready) {
   // Find the ready coroutine with the highest time waiting.
   // We need to process all ready coroutines once to choose the
   // one to run.
@@ -529,8 +536,8 @@ CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
   return ChosenCoroutine(chosen, chosen_fd);
 }
 
-CoroutineScheduler::ChosenCoroutine CoroutineScheduler::GetRunnableCoroutine(
-    PollState *poll_state, int num_ready) {
+CoroutineScheduler::ChosenCoroutine
+CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state, int num_ready) {
   if (interrupt_fd_.revents != 0) {
     // Interrupted.
     ClearEvent(interrupt_fd_.fd);
@@ -603,6 +610,9 @@ void CoroutineScheduler::AddCoroutine(Coroutine *c) {
 // be removed and can be reused immediately after the completion callback
 // is called.
 void CoroutineScheduler::RemoveCoroutine(Coroutine *c) {
+  coroutine_ids_.Free(c->Id());
+  last_freed_coroutine_id_ = c->Id();
+
   for (auto it = coroutines_.begin(); it != coroutines_.end(); it++) {
     if (*it == c) {
       coroutines_.erase(it);
@@ -613,15 +623,13 @@ void CoroutineScheduler::RemoveCoroutine(Coroutine *c) {
       break;
     }
   }
-  coroutine_ids_.Free(c->Id());
-  last_freed_coroutine_id_ = c->Id();
 }
 
-size_t CoroutineScheduler::AllocateId() {
-  size_t id;
-  if (last_freed_coroutine_id_ != -1) {
+uint32_t CoroutineScheduler::AllocateId() {
+  uint32_t id;
+  if (last_freed_coroutine_id_ != -1U) {
     id = last_freed_coroutine_id_;
-    last_freed_coroutine_id_ = -1;
+    last_freed_coroutine_id_ = -1U;
     coroutine_ids_.Set(id);
   } else {
     id = coroutine_ids_.Allocate();
@@ -640,4 +648,12 @@ void CoroutineScheduler::Show() {
   }
 }
 
-}  // namespace co
+std::vector<std::string> CoroutineScheduler::AllCoroutineStrings() const {
+  std::vector<std::string> r;
+  for (auto *co : coroutines_) {
+    r.emplace_back(co->ToString());
+  }
+  return r;
+}
+
+} // namespace co
