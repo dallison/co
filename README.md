@@ -463,6 +463,60 @@ There is some necessary assembly language magic involved in switching stacks and
 supports ARM64 (Aarch64) and x86_64 only.  32-bit ports would be pretty easy and can
 be done if requested.
 
+# Example code
+I've provided two example programs for your enjoyment:
+
+1. An HTTP server
+1. An HTTP client
+
+Run the server and it will open TCP port 80 on localhost and allow you to
+send HTTP (not HTTPS) requests to it to get a file from the local file
+system.
+
+You can use something like *curl* or *wget* to get exercise the server, or
+you can use the HTTP client program.  The advantage of the HTTP client
+program is that is allows you to run multiple jobs at the same time, something
+that is reasonably difficult with the other tools.
+
+Both the client and server are single threaded coroutine based programs that
+can handle many requests at the same time.  The only limit is the number of
+open files resource limit.
+
+The server could be used as the basis for a simple HTTP server for an embedded
+system (although lack of SSL support is a big issue).  The client is pretty
+functional and supports chunked data.
+
+## Running the server
+To run the server:
+
+```bash
+$ bazel-bin/http_server/http_server
+```
+
+## Runnng the client
+You can run the client with the following args:
+
+1. Hostname - the hostname of the server
+2. Filename - the filename you want to get
+3. -j # - the number of jobs to run at once (default 1)
+
+For example, to get */etc/hosts* 100 times from the server:
+
+```bash
+$ bazel-bin/http_client/http_client localhost /etc/hosts -j 100
+```
+
+If you try too many jobs, the server will be unable to accept new
+connections due to the open file limits.
+
+If you want to slightly stress out the Google servers (be nice, Google
+used to be)
+
+```bash
+$ bazel-bin/http_client/http_client www.google.com / -j 100
+```
+
+
 # Licensing
 This is licensed under the Apache License Version 2.0.  Please see the LICENSE
 file for details.
