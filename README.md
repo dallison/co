@@ -440,8 +440,8 @@ WORKSPACE entry can be used to import it into another Bazel-built system:
 ```
 http_archive(
   name = "coroutines",
-  urls = ["https://github.com/dallison/cocpp/archive/refs/tags/A.B.C.tar.gz"],
-  strip_prefix = "cocpp-A.B.C",
+  urls = ["https://github.com/dallison/co/archive/refs/tags/A.B.C.tar.gz"],
+  strip_prefix = "co-A.B.C",
 )
 
 Where "A.B.C" is replaced by the actual version you want, something like
