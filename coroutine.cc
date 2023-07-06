@@ -576,6 +576,9 @@ void CoroutineScheduler::Run() {
       continue;
     }
 
+    // Copy interrupt fd from poll fd set.
+    interrupt_fd_ = poll_state_.pollfds[0];
+
     // One more tick.
     tick_count_++;
 
