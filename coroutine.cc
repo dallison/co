@@ -547,6 +547,7 @@ CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state, int num_ready) {
   if (interrupt_fd_.revents != 0) {
     // Interrupted.
     ClearEvent(interrupt_fd_.fd);
+    return ChosenCoroutine();
   }
 
   ChosenCoroutine chosen = ChooseRunnable(poll_state, num_ready);
