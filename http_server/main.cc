@@ -250,7 +250,9 @@ void Listener(co::Coroutine *c) {
   setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
   struct sockaddr_in addr = {.sin_family = AF_INET,
                              .sin_port = htons(80),
+#if defined(__APPLE__)
                              .sin_len = sizeof(int),
+#endif
                              .sin_addr.s_addr = INADDR_ANY};
   int e = bind(s, (struct sockaddr *)&addr, sizeof(addr));
   if (e == -1) {

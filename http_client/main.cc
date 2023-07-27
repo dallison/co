@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
+#include <memory>
 
 void Usage(void) {
   fprintf(stderr, "usage: client -j <jobs> <host> <filename>\n");
@@ -228,7 +229,9 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
 
   struct sockaddr_in addr = {.sin_family = AF_INET,
                              .sin_port = htons(80),
+#if defined(__APPLE__)
                              .sin_len = sizeof(int),
+#endif
                              .sin_addr.s_addr = ipaddr};
   int e = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
   if (e != 0) {
