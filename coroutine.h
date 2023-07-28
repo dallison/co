@@ -30,9 +30,14 @@
 #if defined(__APPLE__)
 #define CTX_MODE CTX_SETJMP
 #include <csetjmp>
-#else
+#elif defined(__linux__)
+// Linux supports user contexts.  Let's use them so that tsan works.
 #define CTX_MODE CTX_UCONTEXT
 #include <ucontext.h>
+#else
+// Portable version is setjmp/longjmp
+#define CTX_MODE CTX_SETJMP
+#include <csetjmp>
 #endif
 
 #include <poll.h>
