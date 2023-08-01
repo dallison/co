@@ -491,6 +491,7 @@ void Coroutine::Resume(int value) {
       getcontext(&exit_);
       // We will get here when the coroutines's function returns.
       if (first_resume_) {
+        first_resume_ = false;
         // This is the first time we have been resumed so set the context
         // to that set up by makecontext.  This will set the stack and invoke
         // the function.
