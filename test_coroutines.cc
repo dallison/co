@@ -95,6 +95,47 @@ TEST(Coroutines, Wait) {
   ASSERT_EQ(pipe2[0], co2_value);
 }
 
+TEST(Coroutines, Timeout) {
+  co::CoroutineScheduler scheduler;
+  bool co1_run = false;
+  bool co2_run = false;
+
+  int pipe1[2];
+  int pipe2[2];
+
+  pipe(pipe1);
+  pipe(pipe2);
+
+  int co1_value = 0;
+  int co2_value = 0;
+
+  bool co1_wokeup = false;
+  bool co2_wokeup = false;
+
+  co::Coroutine co1(scheduler, [&co1_run, pipe1, &co1_value,
+                                &co1_wokeup](co::Coroutine *c) {
+    co1_run = true;
+    co1_value = c->Wait(pipe1[0], POLLIN, 1000*1000*1000);
+    co1_wokeup = true;
+  });
+
+  co::Coroutine co2(scheduler, [&co2_run, pipe2, &co2_value,
+                                &co2_wokeup](co::Coroutine *c) {
+    co2_run = true;
+    co2_value = c->Wait(pipe2[0], POLLIN, 1000*1000*1000);
+    co2_wokeup = true;
+  });
+
+  scheduler.Run();
+
+  ASSERT_TRUE(co1_run);
+  ASSERT_TRUE(co2_run);
+  ASSERT_TRUE(co1_wokeup);
+  ASSERT_TRUE(co2_wokeup);
+  ASSERT_EQ(-1, co1_value);
+  ASSERT_EQ(-1, co2_value);
+}
+
 TEST(Coroutines, Generator) {
   co::CoroutineScheduler scheduler;
   int factorial = 1;
