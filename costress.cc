@@ -8,14 +8,14 @@
 
 using namespace co;
 
-void Test(Coroutine* c) {
+void Test(Coroutine *c) {
   for (int i = 0; i < 10; i++) {
     // printf("%s: %d\n", c->Name().c_str(), i);
     c->Yield();
   }
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   CoroutineScheduler scheduler;
   std::vector<std::unique_ptr<Coroutine>> coroutines;
   for (int i = 0; i < 1000; i++) {

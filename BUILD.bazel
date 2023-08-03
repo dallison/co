@@ -6,12 +6,12 @@ cc_library(
         "coroutine.cc",
     ],
     hdrs = [
+        "bitset.h",
         "coroutine.h",
-         "bitset.h",
-   ],
-   copts = [
-    "-Wall",
-   ]
+    ],
+    copts = [
+        "-Wall",
+    ],
 )
 
 cc_binary(
@@ -19,7 +19,7 @@ cc_binary(
     srcs = ["cotest.cc"],
     deps = [
         ":co",
-    ]
+    ],
 )
 
 cc_binary(
@@ -27,7 +27,7 @@ cc_binary(
     srcs = ["costress.cc"],
     deps = [
         ":co",
-    ]
+    ],
 )
 
 cc_test(
@@ -35,8 +35,8 @@ cc_test(
     srcs = [
         "test_coroutines.cc",
     ],
-   deps = [
-    ":co",
-    "@com_google_googletest//:gtest_main",
-   ],
+    deps = [
+        ":co",
+        "@com_google_googletest//:gtest_main",
+    ],
 )

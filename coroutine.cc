@@ -49,7 +49,7 @@ static void TriggerEvent(int fd) {
 #if defined(__APPLE__)
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, 0, 0, 0);  // Trigger USER event
+  kevent(fd, &e, 1, 0, 0, 0); // Trigger USER event
 #elif defined(__linux__)
   int64_t val = 1;
   (void)write(fd, &val, 8);
@@ -62,7 +62,7 @@ static void ClearEvent(int fd) {
 #if defined(__APPLE__)
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, nullptr, 0, 0);  // Clear USER event
+  kevent(fd, &e, 1, nullptr, 0, 0); // Clear USER event
 #elif defined(__linux__)
   int64_t val;
   (void)read(fd, &val, 8);
@@ -111,10 +111,8 @@ asm(
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
                      const char *name, bool autostart, size_t stack_size,
                      void *user_data)
-    : scheduler_(machine),
-      function_(std::move(functor)),
-      stack_size_(stack_size),
-      user_data_(user_data) {
+    : scheduler_(machine), function_(std::move(functor)),
+      stack_size_(stack_size), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name == nullptr) {
     char buf[256];
@@ -295,20 +293,20 @@ void Coroutine::ClearEvent() { co::ClearEvent(event_fd_.fd); }
 void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
                            std::vector<Coroutine *> &covec) {
   switch (state_) {
-    case State::kCoReady:
-    case State::kCoYielded:
-      pollfds.push_back(event_fd_);
+  case State::kCoReady:
+  case State::kCoYielded:
+    pollfds.push_back(event_fd_);
+    covec.push_back(this);
+    break;
+  case State::kCoWaiting:
+    for (auto &fd : wait_fds_) {
+      pollfds.push_back(fd);
       covec.push_back(this);
-      break;
-    case State::kCoWaiting:
-      for (auto &fd : wait_fds_) {
-        pollfds.push_back(fd);
-        covec.push_back(this);
-      }
-    case State::kCoNew:
-    case State::kCoRunning:
-    case State::kCoDead:
-      break;
+    }
+  case State::kCoNew:
+  case State::kCoRunning:
+  case State::kCoDead:
+    break;
   }
 }
 
@@ -322,24 +320,24 @@ std::string Coroutine::ToString() const {
 std::string Coroutine::MakeDefaultString() const {
   const char *state = "unknown";
   switch (state_) {
-    case State::kCoNew:
-      state = "new";
-      break;
-    case State::kCoDead:
-      state = "dead";
-      break;
-    case State::kCoReady:
-      state = "ready";
-      break;
-    case State::kCoRunning:
-      state = "runnning";
-      break;
-    case State::kCoWaiting:
-      state = "waiting";
-      break;
-    case State::kCoYielded:
-      state = "yielded";
-      break;
+  case State::kCoNew:
+    state = "new";
+    break;
+  case State::kCoDead:
+    state = "dead";
+    break;
+  case State::kCoReady:
+    state = "ready";
+    break;
+  case State::kCoRunning:
+    state = "runnning";
+    break;
+  case State::kCoWaiting:
+    state = "waiting";
+    break;
+  case State::kCoYielded:
+    state = "yielded";
+    break;
   }
   char buffer[256];
   snprintf(buffer, sizeof(buffer), "Coroutine %d: %s: state: %s: address: %p",
@@ -431,19 +429,19 @@ void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 
 void Coroutine::Resume(int value) {
   switch (state_) {
-    case State::kCoReady:
-      // Initial invocation of the coroutine.  We need to do a bit
-      // of magic to switch to the coroutine's stack and invoke
-      // the function using the stack.  When the function returns
-      // we longjmp to the exit environment with the stack restored
-      // to the current one, which is the stack used by the
-      // CoroutineScheduler.
-      state_ = State::kCoRunning;
-      yielded_address_ = nullptr;
+  case State::kCoReady:
+    // Initial invocation of the coroutine.  We need to do a bit
+    // of magic to switch to the coroutine's stack and invoke
+    // the function using the stack.  When the function returns
+    // we longjmp to the exit environment with the stack restored
+    // to the current one, which is the stack used by the
+    // CoroutineScheduler.
+    state_ = State::kCoRunning;
+    yielded_address_ = nullptr;
 #if CTX_MODE == CTX_SETJMP
-      if (setjmp(exit_) == 0) {
-        void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
-        jmp_buf &exit_state = exit_;
+    if (setjmp(exit_) == 0) {
+      void *sp = reinterpret_cast<char *>(stack_) + stack_size_;
+      jmp_buf &exit_state = exit_;
 
 // clang-format off
 #if defined(__aarch64__)
@@ -485,49 +483,49 @@ void Coroutine::Resume(int value) {
 #else
 #error "Unknown architecture"
 #endif
-        // clang-format on
-      }
+      // clang-format on
+    }
 #else
-      getcontext(&exit_);
-      // We will get here when the coroutines's function returns.
-      if (first_resume_) {
-        first_resume_ = false;
-        // This is the first time we have been resumed so set the context
-        // to that set up by makecontext.  This will set the stack and invoke
-        // the function.
-        setcontext(&resume_);
-      }
+    getcontext(&exit_);
+    // We will get here when the coroutines's function returns.
+    if (first_resume_) {
+      first_resume_ = false;
+      // This is the first time we have been resumed so set the context
+      // to that set up by makecontext.  This will set the stack and invoke
+      // the function.
+      setcontext(&resume_);
+    }
 #endif
 
-      // Trigger the caller when we exit.
-      if (caller_ != nullptr) {
-        caller_->TriggerEvent();
-      }
-      // Functor returned, we are dead.
-      state_ = State::kCoDead;
-      scheduler_.RemoveCoroutine(this);
-      break;
-    case State::kCoYielded:
-    case State::kCoWaiting:
-      state_ = State::kCoRunning;
-      wait_result_ = value;
+    // Trigger the caller when we exit.
+    if (caller_ != nullptr) {
+      caller_->TriggerEvent();
+    }
+    // Functor returned, we are dead.
+    state_ = State::kCoDead;
+    scheduler_.RemoveCoroutine(this);
+    break;
+  case State::kCoYielded:
+  case State::kCoWaiting:
+    state_ = State::kCoRunning;
+    wait_result_ = value;
 #if CTX_MODE == CTX_SETJMP
-      __real_longjmp(resume_, 1);
+    __real_longjmp(resume_, 1);
 #else
-      setcontext(&resume_);
+    setcontext(&resume_);
 #endif
-      break;
-    case State::kCoRunning:
-    case State::kCoNew:
-      // Should never get here.
-      break;
-    case State::kCoDead:
+    break;
+  case State::kCoRunning:
+  case State::kCoNew:
+    // Should never get here.
+    break;
+  case State::kCoDead:
 #if CTX_MODE == CTX_SETJMP
-      __real_longjmp(exit_, 1);
+    __real_longjmp(exit_, 1);
 #else
-      setcontext(&exit_);
+    setcontext(&exit_);
 #endif
-      break;
+    break;
   }
 }
 
@@ -564,8 +562,8 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 // no two coroutines can have been waiting for the same amount of time.
 // This is a completely fair scheduler with all coroutines given the
 // same priority.
-CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
-    PollState *poll_state, int num_ready) {
+CoroutineScheduler::ChosenCoroutine
+CoroutineScheduler::ChooseRunnable(PollState *poll_state, int num_ready) {
   // Find the ready coroutine with the highest time waiting.
   // We need to process all ready coroutines once to choose the
   // one to run.
@@ -592,8 +590,8 @@ CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
   return ChosenCoroutine(chosen, chosen_fd);
 }
 
-CoroutineScheduler::ChosenCoroutine CoroutineScheduler::GetRunnableCoroutine(
-    PollState *poll_state, int num_ready) {
+CoroutineScheduler::ChosenCoroutine
+CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state, int num_ready) {
   if (interrupt_fd_.revents != 0) {
     // Interrupted.
     ClearEvent(interrupt_fd_.fd);
@@ -720,4 +718,4 @@ std::vector<std::string> CoroutineScheduler::AllCoroutineStrings() const {
   return r;
 }
 
-}  // namespace co
+} // namespace co
