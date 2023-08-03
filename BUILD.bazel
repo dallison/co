@@ -9,8 +9,6 @@ cc_library(
         "coroutine.h",
          "bitset.h",
    ],
-   deps = [
-   ],
    copts = [
     "-Wall",
    ]
@@ -30,4 +28,15 @@ cc_binary(
     deps = [
         ":co",
     ]
+)
+
+cc_test(
+    name = "test_coroutines",
+    srcs = [
+        "test_coroutines.cc",
+    ],
+   deps = [
+    ":co",
+    "@com_google_googletest//:gtest_main",
+   ],
 )
