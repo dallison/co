@@ -43,7 +43,7 @@ inline uint32_t BitSet::Allocate() {
     for (uint32_t i = start; i < bits_.size(); i++) {
       uint32_t bit = static_cast<uint32_t>(ffsll(~bits_[i]));
       if (bit != 0) {
-        bits_[i] |= (1 << (bit - 1));
+        bits_[i] |= (1LL << (bit - 1));
         return i * 64 + (bit - 1);
       }
     }
@@ -62,7 +62,7 @@ inline void BitSet::Free(uint32_t bit) {
     return;
   }
   uint32_t b = bit % 64;
-  bits_[word] &= ~(1 << b);
+  bits_[word] &= ~(1LL << b);
 }
 
 inline void BitSet::Set(uint32_t bit) {
@@ -71,7 +71,7 @@ inline void BitSet::Set(uint32_t bit) {
     return;
   }
   uint32_t b = bit % 64;
-  bits_[word] |= (1 << b);
+  bits_[word] |= (1LL << b);
 }
 
 inline bool BitSet::IsEmpty() const {
@@ -89,7 +89,7 @@ inline bool BitSet::Contains(uint32_t bit) const {
     return false;
   }
   uint32_t b = bit % 64;
-  return (bits_[word] & (1 << b)) != 0;
+  return (bits_[word] & (1LL << b)) != 0;
 }
 }  // namespace co
 #endif  // __BITSET_H
