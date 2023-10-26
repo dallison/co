@@ -83,7 +83,7 @@ template <typename T> class Generator;
 class Coroutine {
 public:
   Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
-            const char *name = nullptr, bool autostart = true,
+            std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
   ~Coroutine();
@@ -185,6 +185,7 @@ private:
   uint32_t id_;                // Coroutine ID.
   CoroutineFunction function_; // Coroutine body.
   std::string name_;           // Optional name.
+  int interrupt_fd_;
   State state_;
   void *stack_;                     // Stack, allocated from malloc.
   void *yielded_address_ = nullptr; // Address at which we've yielded.
@@ -218,13 +219,13 @@ private:
 template <typename T> class Generator : public Coroutine {
 public:
   Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
-            const char *name = nullptr, size_t stack_size = kCoDefaultStackSize,
+            std::string name = "", int interrupt_fd = -1, size_t stack_size = kCoDefaultStackSize,
             void *user_data = nullptr)
       : Coroutine(machine,
                   [this](Coroutine *c) {
                     gen_function_(reinterpret_cast<Generator<T> *>(c));
                   },
-                  name, /*autostart=*/false, stack_size, user_data),
+                  name, interrupt_fd, /*autostart=*/false, stack_size, user_data),
         gen_function_(function) {}
 
   // Yield control and store value.

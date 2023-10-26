@@ -109,17 +109,18 @@ asm(
 // clang-format on
 
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
-                     const char *name, bool autostart, size_t stack_size,
+                     std::string name, int interrupt_fd, 
+                     bool autostart, size_t stack_size,
                      void *user_data)
-    : scheduler_(machine), function_(std::move(functor)),
+    : scheduler_(machine), function_(std::move(functor)), interrupt_fd_(interrupt_fd),
       stack_size_(stack_size), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
-  if (name == nullptr) {
+  if (name.empty()) {
     char buf[256];
     snprintf(buf, sizeof(buf), "co-%d", id_);
     name_ = buf;
   } else {
-    name_ = name;
+    name_ = std::move(name);
   }
 
   stack_ = malloc(stack_size);
@@ -229,6 +230,10 @@ int Coroutine::Wait(int fd, short event_mask, uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   struct pollfd pfd = {.fd = fd, .events = event_mask};
   wait_fds_.push_back(pfd);
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    wait_fds_.push_back(ifd);
+  }
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -246,6 +251,10 @@ int Coroutine::Wait(int fd, short event_mask, uint64_t timeout_ns) {
 int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   wait_fds_.push_back(fd);
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    wait_fds_.push_back(ifd);
+  }
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -265,6 +274,10 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
   state_ = State::kCoWaiting;
   for (auto &fd : fds) {
     wait_fds_.push_back(fd);
+  }
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    wait_fds_.push_back(ifd);
   }
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
