@@ -106,6 +106,9 @@ public:
   // was triggered or -1 for timeout.
   int Wait(int fd, short event_mask = POLLIN, uint64_t timeout_ns = 0);
 
+  // Wait for a set of fds, all with the same event mask. 
+  int Wait(const std::vector<int>& fd, short event_mask = POLLIN, uint64_t timeout_ns = 0);
+
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
 

@@ -248,6 +248,31 @@ int Coroutine::Wait(int fd, short event_mask, uint64_t timeout_ns) {
   return EndOfWait(timer_fd);
 }
 
+int Coroutine::Wait(const std::vector<int> &fds,
+                    short event_mask,
+                    uint64_t timeout_ns) {
+  state_ = State::kCoWaiting;
+  for (auto &fd : fds) {
+    wait_fds_.push_back({.fd = fd, .events = event_mask});
+  }
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    wait_fds_.push_back(ifd);
+  }
+  int timer_fd = AddTimeout(timeout_ns);
+  yielded_address_ = __builtin_return_address(0);
+  last_tick_ = scheduler_.TickCount();
+#if CTX_MODE == CTX_SETJMP
+  if (setjmp(resume_) == 0) {
+    __real_longjmp(scheduler_.YieldBuf(), 1);
+  }
+#else
+  swapcontext(&resume_, scheduler_.YieldCtx());
+#endif
+  // Get here when resumed.
+  return EndOfWait(timer_fd);
+}
+
 int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
   state_ = State::kCoWaiting;
   wait_fds_.push_back(fd);
