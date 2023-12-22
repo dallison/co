@@ -332,6 +332,7 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
                            std::vector<Coroutine *> &covec) {
   switch (state_) {
   case State::kCoReady:
+    [[fallthrough]];
   case State::kCoYielded:
     pollfds.push_back(event_fd_);
     covec.push_back(this);
@@ -342,7 +343,9 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
       covec.push_back(this);
     }
   case State::kCoNew:
+    [[fallthrough]];
   case State::kCoRunning:
+    [[fallthrough]];
   case State::kCoDead:
     break;
   }
