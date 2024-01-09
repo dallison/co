@@ -615,7 +615,7 @@ CoroutineScheduler::ChosenCoroutine CoroutineScheduler::ChooseRunnable(
   // a data structure and processing it afterwards.
   Coroutine *chosen = nullptr;
   int chosen_fd;
-  uint64_t max_wait;
+  uint64_t max_wait = 0UL;
   for (size_t i = 1; i < poll_state->pollfds.size(); i++) {
     struct pollfd *fd = &poll_state->pollfds[i];
     Coroutine *co = poll_state->coroutines[i - 1];
