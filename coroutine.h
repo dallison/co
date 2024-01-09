@@ -56,7 +56,8 @@ namespace co {
 
 class CoroutineScheduler;
 class Coroutine;
-template <typename T> class Generator;
+template <typename T>
+class Generator;
 
 using CoroutineFunction = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine *)>;
@@ -71,7 +72,8 @@ extern "C" {
 void __co_Invoke(class Coroutine *c);
 }
 
-template <typename T> class Generator;
+template <typename T>
+class Generator;
 
 // This is a Coroutine.  It executes its function (pointer to a function
 // or a lambda).
@@ -81,10 +83,16 @@ template <typename T> class Generator;
 // be started automatically.  It can have some user data which is
 // not owned by the coroutine.
 class Coroutine {
-public:
+ public:
   Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+
+  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+            std::string name, size_t stack_size)
+      : Coroutine(machine, function, name, -1, true,
+                  stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
+  }
 
   ~Coroutine();
 
@@ -95,7 +103,8 @@ public:
   void Yield();
 
   // Call another coroutine and store the result.
-  template <typename T> T Call(Generator<T> &callee);
+  template <typename T>
+  T Call(Generator<T> &callee);
 
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
@@ -106,8 +115,9 @@ public:
   // was triggered or -1 for timeout.
   int Wait(int fd, short event_mask = POLLIN, uint64_t timeout_ns = 0);
 
-  // Wait for a set of fds, all with the same event mask. 
-  int Wait(const std::vector<int>& fd, short event_mask = POLLIN, uint64_t timeout_ns = 0);
+  // Wait for a set of fds, all with the same event mask.
+  int Wait(const std::vector<int> &fd, short event_mask = POLLIN,
+           uint64_t timeout_ns = 0);
 
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
@@ -157,7 +167,7 @@ public:
   // this will be the same as that printed by Show().
   std::string ToString() const;
 
-private:
+ private:
   enum class State {
     kCoNew,
     kCoReady,
@@ -167,7 +177,8 @@ private:
     kCoDead,
   };
   friend class CoroutineScheduler;
-  template <typename T> friend class Generator;
+  template <typename T>
+  friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
   void InvokeFunction();
@@ -185,17 +196,17 @@ private:
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                // Coroutine ID.
-  CoroutineFunction function_; // Coroutine body.
-  std::string name_;           // Optional name.
+  uint32_t id_;                 // Coroutine ID.
+  CoroutineFunction function_;  // Coroutine body.
+  std::string name_;            // Optional name.
   int interrupt_fd_;
   State state_;
-  void *stack_;                     // Stack, allocated from malloc.
-  void *yielded_address_ = nullptr; // Address at which we've yielded.
+  void *stack_;                      // Stack, allocated from malloc.
+  void *yielded_address_ = nullptr;  // Address at which we've yielded.
   size_t stack_size_;
 #if CTX_MODE == CTX_SETJMP
-  jmp_buf resume_; // Program environemnt for resuming.
-  jmp_buf exit_;   // Program environemt to exit.
+  jmp_buf resume_;  // Program environemnt for resuming.
+  jmp_buf exit_;    // Program environemt to exit.
 #else
   ucontext_t resume_;
   ucontext_t exit_;
@@ -203,11 +214,11 @@ private:
   int wait_result_;
   bool first_resume_ = true;
 
-  struct pollfd event_fd_;              // Pollfd for event.
-  std::vector<struct pollfd> wait_fds_; // Pollfds for waiting for an fd.
-  Coroutine *caller_ = nullptr;         // If being called, who is calling us.
-  void *user_data_;                     // User data, not owned by this.
-  uint64_t last_tick_ = 0;              // Tick count of last resume.
+  struct pollfd event_fd_;               // Pollfd for event.
+  std::vector<struct pollfd> wait_fds_;  // Pollfds for waiting for an fd.
+  Coroutine *caller_ = nullptr;          // If being called, who is calling us.
+  void *user_data_;                      // User data, not owned by this.
+  uint64_t last_tick_ = 0;               // Tick count of last resume.
 
   // Function used to create a string for this coroutine.
   std::function<std::string()> to_string_callback_;
@@ -219,25 +230,27 @@ private:
 //
 // A generator doesn't start automatically.  It's started on the
 // first call.
-template <typename T> class Generator : public Coroutine {
-public:
+template <typename T>
+class Generator : public Coroutine {
+ public:
   Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
-            std::string name = "", int interrupt_fd = -1, size_t stack_size = kCoDefaultStackSize,
-            void *user_data = nullptr)
+            std::string name = "", int interrupt_fd = -1,
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
       : Coroutine(machine,
                   [this](Coroutine *c) {
                     gen_function_(reinterpret_cast<Generator<T> *>(c));
                   },
-                  name, interrupt_fd, /*autostart=*/false, stack_size, user_data),
+                  name, interrupt_fd, /*autostart=*/false, stack_size,
+                  user_data),
         gen_function_(function) {}
 
   // Yield control and store value.
   void YieldValue(const T &value);
 
-private:
+ private:
   friend class Coroutine;
   GeneratorFunction<T> gen_function_;
-  T *result_ = nullptr; // Where to put result in YieldValue.
+  T *result_ = nullptr;  // Where to put result in YieldValue.
 };
 
 struct PollState {
@@ -246,7 +259,7 @@ struct PollState {
 };
 
 class CoroutineScheduler {
-public:
+ public:
   CoroutineScheduler();
   ~CoroutineScheduler();
 
@@ -280,9 +293,10 @@ public:
   // coroutines.
   std::vector<std::string> AllCoroutineStrings() const;
 
-private:
+ private:
   friend class Coroutine;
-  template <typename T> friend class Generator;
+  template <typename T>
+  friend class Generator;
   struct ChosenCoroutine {
     ChosenCoroutine() = default;
     ChosenCoroutine(Coroutine *c, int f) : co(c), fd(f) {}
@@ -318,7 +332,8 @@ private:
   CompletionCallback completion_callback_;
 };
 
-template <typename T> inline void Generator<T>::YieldValue(const T &value) {
+template <typename T>
+inline void Generator<T>::YieldValue(const T &value) {
   // Copy value.
   if (result_ != nullptr) {
     *result_ = value;
@@ -326,7 +341,8 @@ template <typename T> inline void Generator<T>::YieldValue(const T &value) {
   YieldNonTemplate();
 }
 
-template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
+template <typename T>
+inline T Coroutine::Call(Generator<T> &callee) {
   T result;
   // Tell the callee that it's being called and where to store the value.
   callee.caller_ = this;
@@ -337,5 +353,5 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
   return result;
 }
 
-} // namespace co
+}  // namespace co
 #endif /* coroutine_h */
