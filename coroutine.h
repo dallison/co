@@ -116,7 +116,7 @@ struct CoroutineOptions {
 // of pollfds
 struct WaitFd {
   int fd;
-  uint32_t event;
+  uint32_t events;
 };
 #endif
 

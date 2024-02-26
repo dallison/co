@@ -27,7 +27,7 @@
 #error "Unknown operating system"
 #endif
 
-[[maybe_unused]] constexpr bool kCoDebug = false;
+[[maybe_unused]] constexpr bool kCoDebug = true;
 
 namespace co {
 static int NewEventFd() {
@@ -176,6 +176,9 @@ Coroutine::~Coroutine() {
 void Coroutine::SetState(State state) {
   if (state == state_) {
     return;
+  }
+  if (kCoDebug) {
+    std::cerr << Name() << " moving from state " << int(state_) << " to " << int(state) << std::endl;
   }
 #if POLL_MODE == POLL_EPOLL
   // In epoll mode we manipulate the epoll fd set based on the state
@@ -356,7 +359,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
 }
 
 #if POLL_MODE == POLL_EPOLL
-int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) {
+int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
   for (auto &fd : fds) {
     wait_fds_.push_back(CoroutineFd(this, fd.fd, fd.events));
   }
