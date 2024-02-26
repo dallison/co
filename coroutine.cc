@@ -9,6 +9,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <iostream>
+#include <cassert>
 
 #include "bitset.h"
 
@@ -162,7 +164,13 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
   }
 }
 
-Coroutine::~Coroutine() { CloseEventFd(event_fd_.fd); }
+Coroutine::~Coroutine() {
+#if POLL_MODE == POLL_EPOLL
+ CloseEventFd(yield_fd_.fd); 
+#else
+ CloseEventFd(event_fd_.fd); 
+#endif
+}
 
 void Coroutine::SetState(State state) {
   if (state == state_) {
@@ -175,14 +183,14 @@ void Coroutine::SetState(State state) {
   // We are leaving this state, remove the epoll fds to prepare for the
   // new state.
   switch (state_) {
-  case State::kWaiting:
+  case State::kCoWaiting:
     // Leaving waiting state, remove the wait fds from the poll set
     for (auto &fd : wait_fds_) {
-      scheduler_.RemoveEpollFd(fd);
+      scheduler_.RemoveEpollFd(&fd);
     }
     break;
-  case State::kYielded:
-  case State::kReady:
+  case State::kCoYielded:
+  case State::kCoReady:
     scheduler_.RemoveEpollFd(&yield_fd_);
     break;
   default:
@@ -201,7 +209,7 @@ void Coroutine::SetState(State state) {
     break;
   case State::kCoWaiting:
     for (auto &fd : wait_fds_) {
-      scheduler_.AddEpollFd(fd, fd.events);
+      scheduler_.AddEpollFd(&fd, fd.events);
     }
     break;
   case State::kCoYielded:
@@ -399,10 +407,23 @@ void Coroutine::Nanosleep(uint64_t ns) {
   close(timer);
 }
 
-void Coroutine::TriggerEvent() { co::TriggerEvent(event_fd_.fd); }
+void Coroutine::TriggerEvent() { 
+#if POLL_MODE == POLL_EPOLL
+co::TriggerEvent(yield_fd_.fd); 
+#else
+co::TriggerEvent(event_fd_.fd); 
+#endif
+}
 
-void Coroutine::ClearEvent() { co::ClearEvent(event_fd_.fd); }
+void Coroutine::ClearEvent() { 
+#if POLL_MODE == POLL_EPOLL
+co::ClearEvent(yield_fd_.fd); 
+#else
+co::ClearEvent(event_fd_.fd); 
+#endif
+}
 
+#if POLL_MODE == POLL_POLL
 void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
                            std::vector<Coroutine *> &covec) {
   switch (state_) {
@@ -425,6 +446,7 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
     break;
   }
 }
+#endif
 
 std::string Coroutine::ToString() const {
   if (IsAlive() && to_string_callback_ != nullptr) {
@@ -677,7 +699,7 @@ CoroutineFd *CoroutineScheduler::ChooseRunnable(
   for (size_t i = 1; i < size_t(num_ready); i++) {
     const struct epoll_event &event = events[i];
     if (event.data.ptr == nullptr) {
-      ClearEventFd(interrupt_fd_);
+      ClearEvent(interrupt_fd_);
       return nullptr;
     }
     CoroutineFd *cc = reinterpret_cast<CoroutineFd *>(event.data.ptr);
@@ -707,7 +729,7 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   struct epoll_event event = {.events = events, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
   assert(e == 0);
-  num_poll_events_++;
+  num_epoll_events_++;
 }
 
 void CoroutineScheduler::AddEpollFd(CoroutineFd *cfd, uint32_t events) {
@@ -717,7 +739,7 @@ void CoroutineScheduler::AddEpollFd(CoroutineFd *cfd, uint32_t events) {
   struct epoll_event event = {.events = events, .data = {.ptr = cfd}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, cfd->fd, &event);
   assert(e == 0);
-  num_poll_events_++;
+  num_epoll_events_++;
 }
 
 void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
@@ -727,7 +749,7 @@ void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
   struct epoll_event event = {.events = EPOLLIN, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, cfd->fd, &event);
   assert(e == 0);
-  num_poll_events_++;
+  num_epoll_events_++;
 }
 
 #else
@@ -922,7 +944,11 @@ uint32_t CoroutineScheduler::AllocateId() {
 
 void CoroutineScheduler::Stop() {
   running_ = false;
+#if POLL_MODE == POLL_EPOLL
+  TriggerEvent(interrupt_fd_);
+#else
   TriggerEvent(interrupt_fd_.fd);
+#endif
 }
 
 void CoroutineScheduler::Show() {

@@ -200,8 +200,10 @@ private:
   int EndOfWait(int timer_fd);
   int AddTimeout(uint64_t timeout_ns);
   State GetState() const { return state_; }
+#if POLL_MODE == POLL_POLL
   void AddPollFds(std::vector<struct pollfd> &pollfds,
                   std::vector<Coroutine *> &covec);
+#endif
   void Resume(int value);
   void TriggerEvent();
   void ClearEvent();
@@ -354,7 +356,7 @@ private:
 #if POLL_MODE == POLL_EPOLL
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
-  size_t num_poll_events_ = 0;
+  size_t num_epoll_events_ = 0;
 #else
   PollState poll_state_;
   struct pollfd interrupt_fd_;
