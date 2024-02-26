@@ -57,6 +57,7 @@
 #include <list>
 #include <string>
 #include <vector>
+#include "absl/container/flat_hash_map.h"
 
 #include "bitset.h"
 
@@ -357,6 +358,7 @@ private:
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
+  absl::flat_hash_map<int, CoroutineFd*> coroutine_fds_;
 #else
   PollState poll_state_;
   struct pollfd interrupt_fd_;

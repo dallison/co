@@ -27,6 +27,8 @@
 #error "Unknown operating system"
 #endif
 
+constexpr bool kCoDebug = false;
+
 namespace co {
 static int NewEventFd() {
   int event_fd;
@@ -135,7 +137,6 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
   makecontext(&resume_, func, 1, this);
 #endif
 
-  SetState(State::kCoNew);
 #if POLL_MODE == POLL_EPOLL
   int efd = NewEventFd();
   if (efd == -1) {
@@ -190,6 +191,7 @@ void Coroutine::SetState(State state) {
     }
     break;
   case State::kCoYielded:
+    [[fallthrough]];
   case State::kCoReady:
     scheduler_.RemoveEpollFd(&yield_fd_);
     break;
@@ -644,6 +646,7 @@ void Coroutine::Resume(int value) {
     scheduler_.RemoveCoroutine(this);
     break;
   case State::kCoYielded:
+    [[fallthrough]];
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
@@ -654,6 +657,7 @@ void Coroutine::Resume(int value) {
 #endif
     break;
   case State::kCoRunning:
+    [[fallthrough]];
   case State::kCoNew:
     // Should never get here.
     break;
@@ -696,7 +700,7 @@ CoroutineFd *CoroutineScheduler::ChooseRunnable(
     const std::vector<struct epoll_event> &events, int num_ready) {
   CoroutineFd *chosen = nullptr;
   uint64_t max_wait = 0UL;
-  for (size_t i = 1; i < size_t(num_ready); i++) {
+  for (size_t i = 0; i < size_t(num_ready); i++) {
     const struct epoll_event &event = events[i];
     if (event.data.ptr == nullptr) {
       ClearEvent(interrupt_fd_);
@@ -726,6 +730,9 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   if (fd == -1) {
     return;
   }
+  if (kCoDebug) {
+    std::cerr << "adding raw epoll fd " << fd << std::endl;
+  }
   struct epoll_event event = {.events = events, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
   assert(e == 0);
@@ -736,20 +743,40 @@ void CoroutineScheduler::AddEpollFd(CoroutineFd *cfd, uint32_t events) {
   if (cfd->fd == -1) {
     return;
   }
+  if (kCoDebug) {
+    std::cerr << "adding coroutine epoll fd " << cfd->fd << std::endl;
+  }
   struct epoll_event event = {.events = events, .data = {.ptr = cfd}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, cfd->fd, &event);
-  assert(e == 0);
+  if (e == -1) {
+    if (errno == EEXIST) {
+       auto it = coroutine_fds_.find(cfd->fd);
+       if (it != coroutine_fds_.end()) {
+         std::cerr << "File descriptor " << cfd->fd << " is already registered by coroutine " << cfd->co->Name() << std::endl;
+       } else {
+         std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+       }
+    } else {
+       std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+    }
+    abort();
+  } 
   num_epoll_events_++;
+  coroutine_fds_.insert(std::make_pair(cfd->fd, cfd));
 }
 
 void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
   if (cfd->fd == -1) {
     return;
   }
+  if (kCoDebug) {
+    std::cerr << "removing coroutine epoll fd " << cfd->fd << std::endl;
+  }
   struct epoll_event event = {.events = EPOLLIN, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, cfd->fd, &event);
   assert(e == 0);
-  num_epoll_events_++;
+  num_epoll_events_--;
+  coroutine_fds_.erase(cfd->fd);
 }
 
 #else

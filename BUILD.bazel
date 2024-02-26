@@ -4,13 +4,16 @@ cc_library(
     name = "co",
     srcs = [
         "coroutine.cc",
-    ],
+  ],
     hdrs = [
         "bitset.h",
         "coroutine.h",
     ],
     copts = [
         "-Wall",
+    ],
+    deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
     ],
 )
 
