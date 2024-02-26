@@ -27,7 +27,7 @@
 #error "Unknown operating system"
 #endif
 
-[[maybe_unused]] constexpr bool kCoDebug = true;
+constexpr bool kCoDebug = false;
 
 namespace co {
 static int NewEventFd() {

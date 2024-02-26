@@ -265,7 +265,7 @@ private:
   CoroutineFunction function_; // Coroutine body.
   std::string name_;           // Optional name.
   int interrupt_fd_;
-  State state_;
+  State state_ = State::kCoNew;
   std::vector<char> stack_;         // Stack, allocated from malloc.
   void *yielded_address_ = nullptr; // Address at which we've yielded.
 #if CTX_MODE == CTX_SETJMP
