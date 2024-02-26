@@ -20,6 +20,16 @@
 
 // Do we use ::poll or ::epoll?  The epoll system call is Linux only and
 // can improve performance.
+//
+// NOTE: there is a difference in behavior when using epoll vs poll.  In epoll
+// mode you can't add the same fd to the poll set more than once.  There is
+// no such restriction for poll.  This means that two coroutines can't wait
+// for the same fd at the same time.  This is usually an error anyway
+// but is not enforced with poll.
+//
+// The main effect of this is when passing an interrrupt_fd to the coroutines.
+// You will need to dup(2) it before passing to more than one coroutine.  This
+// is normally what you need anyway.
 #define POLL_EPOLL 1
 #define POLL_POLL 2
 
@@ -50,6 +60,10 @@
 
 #include <poll.h>
 
+#if POLL_MODE == POLL_EPOLL
+#include "absl/container/flat_hash_map.h"
+#endif
+
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -57,7 +71,6 @@
 #include <list>
 #include <string>
 #include <vector>
-#include "absl/container/flat_hash_map.h"
 
 #include "bitset.h"
 
@@ -90,6 +103,23 @@ struct CoroutineFd {
   uint32_t events = 0;
 };
 
+struct CoroutineOptions {
+  std::string name;
+  int interrupt_fd = -1;
+  bool autostart = true;
+  size_t stack_size = kCoDefaultStackSize;
+  void *user_data = nullptr;
+};
+
+#if POLL_MODE == POLL_EPOLL
+// This is to provide the epoll equivalent of waiting for a set
+// of pollfds
+struct WaitFd {
+  int fd;
+  uint32_t event;
+};
+#endif
+
 // This is a Coroutine.  It executes its function (pointer to a function
 // or a lambda).
 //
@@ -99,6 +129,10 @@ struct CoroutineFd {
 // not owned by the coroutine.
 class Coroutine {
 public:
+  // Important note: when using an interrupt_fd, you need to be careful
+  // to duplicate it by calling dup(2) for each coroutine.  The coroutine
+  // will add it to the poll set and that is racy if you use the same
+  // fd in two coroutines.  In fact, when using epoll, it won't be allowed.
   Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
@@ -108,6 +142,14 @@ public:
       : Coroutine(machine, function, name, -1, true,
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
+
+  // Options based constructor.
+  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+            CoroutineOptions opts)
+      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+                  opts.autostart,
+                  opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
+                  opts.user_data) {}
 
   ~Coroutine();
 
@@ -133,7 +175,9 @@ public:
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
            uint64_t timeout_ns = 0);
 
-#if POLL_MODE == POLL_POLL
+#if POLL_MODE == POLL_EPOLL
+  int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
+#else
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
 
@@ -358,7 +402,7 @@ private:
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
-  absl::flat_hash_map<int, CoroutineFd*> coroutine_fds_;
+  absl::flat_hash_map<int, CoroutineFd *> coroutine_fds_;
 #else
   PollState poll_state_;
   struct pollfd interrupt_fd_;

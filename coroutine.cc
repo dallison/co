@@ -9,8 +9,8 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <iostream>
 #include <cassert>
+#include <iostream>
 
 #include "bitset.h"
 
@@ -27,7 +27,7 @@
 #error "Unknown operating system"
 #endif
 
-constexpr bool kCoDebug = false;
+[[maybe_unused]] constexpr bool kCoDebug = false;
 
 namespace co {
 static int NewEventFd() {
@@ -167,9 +167,9 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
 
 Coroutine::~Coroutine() {
 #if POLL_MODE == POLL_EPOLL
- CloseEventFd(yield_fd_.fd); 
+  CloseEventFd(yield_fd_.fd);
 #else
- CloseEventFd(event_fd_.fd); 
+  CloseEventFd(event_fd_.fd);
 #endif
 }
 
@@ -355,7 +355,30 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   return EndOfWait(timer_fd);
 }
 
-#if POLL_MODE == POLL_POLL
+#if POLL_MODE == POLL_EPOLL
+int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) {
+  for (auto &fd : fds) {
+    wait_fds_.push_back(CoroutineFd(this, fd.fd, fd.events));
+  }
+  if (interrupt_fd_ != -1) {
+    wait_fds_.push_back(CoroutineFd(this, interrupt_fd_, EPOLLIN));
+  }
+  int timer_fd = AddTimeout(timeout_ns);
+  yielded_address_ = __builtin_return_address(0);
+  last_tick_ = scheduler_.TickCount();
+  SetState(State::kCoWaiting);
+
+#if CTX_MODE == CTX_SETJMP
+  if (setjmp(resume_) == 0) {
+    __real_longjmp(scheduler_.YieldBuf(), 1);
+  }
+#else
+  swapcontext(&resume_, scheduler_.YieldCtx());
+#endif
+  // Get here when resumed.
+  return EndOfWait(timer_fd);
+}
+#else
 int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
   wait_fds_.push_back(fd);
   if (interrupt_fd_ != -1) {
@@ -409,19 +432,19 @@ void Coroutine::Nanosleep(uint64_t ns) {
   close(timer);
 }
 
-void Coroutine::TriggerEvent() { 
+void Coroutine::TriggerEvent() {
 #if POLL_MODE == POLL_EPOLL
-co::TriggerEvent(yield_fd_.fd); 
+  co::TriggerEvent(yield_fd_.fd);
 #else
-co::TriggerEvent(event_fd_.fd); 
+  co::TriggerEvent(event_fd_.fd);
 #endif
 }
 
-void Coroutine::ClearEvent() { 
+void Coroutine::ClearEvent() {
 #if POLL_MODE == POLL_EPOLL
-co::ClearEvent(yield_fd_.fd); 
+  co::ClearEvent(yield_fd_.fd);
 #else
-co::ClearEvent(event_fd_.fd); 
+  co::ClearEvent(event_fd_.fd);
 #endif
 }
 
@@ -750,17 +773,19 @@ void CoroutineScheduler::AddEpollFd(CoroutineFd *cfd, uint32_t events) {
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, cfd->fd, &event);
   if (e == -1) {
     if (errno == EEXIST) {
-       auto it = coroutine_fds_.find(cfd->fd);
-       if (it != coroutine_fds_.end()) {
-         std::cerr << "File descriptor " << cfd->fd << " is already registered by coroutine " << cfd->co->Name() << std::endl;
-       } else {
-         std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
-       }
+      auto it = coroutine_fds_.find(cfd->fd);
+      if (it != coroutine_fds_.end()) {
+        std::cerr << "File descriptor " << cfd->fd
+                  << " is already registered by coroutine " << cfd->co->Name()
+                  << std::endl;
+      } else {
+        std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      }
     } else {
-       std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
     }
     abort();
-  } 
+  }
   num_epoll_events_++;
   coroutine_fds_.insert(std::make_pair(cfd->fd, cfd));
 }

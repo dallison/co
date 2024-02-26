@@ -1,10 +1,26 @@
 package(default_visibility = ["//visibility:public"])
 
+config_setting(
+  name = "macos_arm64",
+  values = {"cpu": "darwin_arm64"},
+)
+
+config_setting(
+  name = "macos_default",
+  values = {"cpu": "darwin"},
+)
+
+config_setting(
+  name = "macos_x86_64",
+  values = {"cpu": "darwin_x86_64"},
+)
+
+
 cc_library(
     name = "co",
     srcs = [
         "coroutine.cc",
-  ],
+    ],
     hdrs = [
         "bitset.h",
         "coroutine.h",
@@ -12,9 +28,12 @@ cc_library(
     copts = [
         "-Wall",
     ],
-    deps = [
-        "@com_google_absl//absl/container:flat_hash_map",
-    ],
+    deps = select({
+        "//:macos_x86_64": [],
+        "//:macos_arm64": [],
+        "//:macos_default": [],
+        "//conditions:default": ["@com_google_absl//absl/container:flat_hash_map"],
+    }),
 )
 
 cc_binary(
