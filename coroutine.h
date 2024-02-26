@@ -241,6 +241,8 @@ private:
   template <typename T> friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
+  static const char *StateName(State state);
+
   void InvokeFunction();
   int EndOfWait(int timer_fd);
   int AddTimeout(uint64_t timeout_ns);

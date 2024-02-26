@@ -173,12 +173,30 @@ Coroutine::~Coroutine() {
 #endif
 }
 
+const char *Coroutine::StateName(State state) {
+  switch (state) {
+  case State::kCoDead:
+    return "dead";
+  case State::kCoNew:
+    return "new";
+  case State::kCoReady:
+    return "ready";
+  case State::kCoRunning:
+    return "running";
+  case State::kCoWaiting:
+    return "waiting";
+  case State::kCoYielded:
+    return "yielded";
+  }
+}
+
 void Coroutine::SetState(State state) {
   if (state == state_) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << Name() << " moving from state " << int(state_) << " to " << int(state) << std::endl;
+    std::cerr << Name() << " moving from state " << StateName(state_) << " to "
+              << StateName(state) << std::endl;
   }
 #if POLL_MODE == POLL_EPOLL
   // In epoll mode we manipulate the epoll fd set based on the state
