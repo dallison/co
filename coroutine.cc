@@ -556,6 +556,7 @@ void Coroutine::Resume(int value) {
       scheduler_.RemoveCoroutine(this);
       break;
     case State::kCoYielded:
+      [[fallthrough]];
     case State::kCoWaiting:
       state_ = State::kCoRunning;
       wait_result_ = value;
@@ -566,6 +567,7 @@ void Coroutine::Resume(int value) {
 #endif
       break;
     case State::kCoRunning:
+      [[fallthrough]];
     case State::kCoNew:
       // Should never get here.
       break;
