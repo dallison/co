@@ -350,6 +350,7 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
         pollfds.push_back(fd);
         covec.push_back(this);
       }
+      [[fallthrough]];
     case State::kCoNew:
       [[fallthrough]];
     case State::kCoRunning:
@@ -555,6 +556,7 @@ void Coroutine::Resume(int value) {
       scheduler_.RemoveCoroutine(this);
       break;
     case State::kCoYielded:
+      [[fallthrough]];
     case State::kCoWaiting:
       state_ = State::kCoRunning;
       wait_result_ = value;
@@ -565,6 +567,7 @@ void Coroutine::Resume(int value) {
 #endif
       break;
     case State::kCoRunning:
+      [[fallthrough]];
     case State::kCoNew:
       // Should never get here.
       break;
