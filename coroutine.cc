@@ -188,6 +188,7 @@ const char *Coroutine::StateName(State state) {
   case State::kCoYielded:
     return "yielded";
   }
+  return "unknown";
 }
 
 void Coroutine::SetState(State state) {
