@@ -272,11 +272,17 @@ static int MakeTimer(uint64_t ns) {
   // Linux uses a timerfd.
   struct itimerspec new_value;
   struct timespec now;
-  constexpr int kBillion = 1000000000;
+  constexpr uint64_t kBillion = 1000000000LL;
 
   clock_gettime(CLOCK_REALTIME, &now);
-  new_value.it_value.tv_sec = now.tv_sec + ns / kBillion;
-  new_value.it_value.tv_nsec = now.tv_nsec + ns % kBillion;
+  uint64_t now_sec = static_cast<uint64_t>(now.tv_sec);
+  uint64_t now_nsec = static_cast<uint64_t>(now.tv_nsec);
+
+  uint64_t then_nsec = now_nsec + ns;
+  uint64_t then_sec = now_sec + then_nsec / kBillion;
+
+  new_value.it_value.tv_sec = then_sec;
+  new_value.it_value.tv_nsec = then_nsec % kBillion;
   new_value.it_interval.tv_sec = 0;
   new_value.it_interval.tv_nsec = 0;
   int fd = timerfd_create(CLOCK_REALTIME, 0);
@@ -484,6 +490,7 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
       pollfds.push_back(fd);
       covec.push_back(this);
     }
+    break;
   case State::kCoNew:
     [[fallthrough]];
   case State::kCoRunning:
