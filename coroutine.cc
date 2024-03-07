@@ -502,27 +502,7 @@ std::string Coroutine::ToString() const {
 }
 
 std::string Coroutine::MakeDefaultString() const {
-  const char *state = "unknown";
-  switch (state_) {
-  case State::kCoNew:
-    state = "new";
-    break;
-  case State::kCoDead:
-    state = "dead";
-    break;
-  case State::kCoReady:
-    state = "ready";
-    break;
-  case State::kCoRunning:
-    state = "runnning";
-    break;
-  case State::kCoWaiting:
-    state = "waiting";
-    break;
-  case State::kCoYielded:
-    state = "yielded";
-    break;
-  }
+  const char *state = StateName(state_);
   char buffer[256];
   snprintf(buffer, sizeof(buffer), "Coroutine %d: %s: state: %s: address: %p",
            id_, name_.c_str(), state, yielded_address_);
