@@ -90,9 +90,13 @@ void TestWaitWithTimeout(Coroutine *c) {
   auto wait2_func = [wait2_end, wait3_end](Coroutine *c) {
     printf("Waiter %s waiting %d %d\n", c->Name().c_str(), wait2_end,
            wait3_end);
+#if POLL_MODE == POLL_EPOLL
+    int fd = c->Wait({wait2_end, wait3_end}, EPOLLIN, 1000000000); // Wait 1 second.
+#else
     struct pollfd fd1 = {.fd = wait2_end, .events = POLLIN};
     struct pollfd fd2 = {.fd = wait3_end, .events = POLLIN};
     int fd = c->Wait({fd1, fd2}, 1000000000); // Wait 1 second.
+#endif
     if (fd == -1) {
       printf("Waiter %s resumed due to timeout\n", c->Name().c_str());
     } else if (fd == wait3_end) {
