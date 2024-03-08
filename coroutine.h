@@ -30,6 +30,10 @@
 // The main effect of this is when passing an interrrupt_fd to the coroutines.
 // You will need to dup(2) it before passing to more than one coroutine.  This
 // is normally what you need anyway.
+//
+// By default POLL_EPOLL is used on Linux and POLL_POLL on all other OSes.
+// If you don't want to use POLL_EPOLL on Linux, modify the setting of
+// POLL_MODE inside the defined(__linux__) below.
 #define POLL_EPOLL 1
 #define POLL_POLL 2
 
@@ -51,11 +55,12 @@
 #define CTX_MODE CTX_UCONTEXT
 #include <sys/epoll.h>
 #include <ucontext.h>
-#define POLL_MODE POLL_EPOLL
+#define POLL_MODE POLL_EPOLL                // Change this line to disable epoll
 #else
 // Portable version is setjmp/longjmp
 #define CTX_MODE CTX_SETJMP
 #include <csetjmp>
+#define POLL_MODE POLL_POLL
 #endif
 
 #include <poll.h>
