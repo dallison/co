@@ -808,7 +808,14 @@ void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
   }
   struct epoll_event event = {.events = EPOLLIN, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, cfd->fd, &event);
-  assert(e == 0);
+  if (e == -1) {
+    if (errno == EBADF) {
+      // Ignore removing a file descriptor that doesn't exist.
+    } else {
+      std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      abort();
+    }
+  }
   num_epoll_events_--;
   coroutine_fds_.erase(cfd->fd);
 }
