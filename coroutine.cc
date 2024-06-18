@@ -115,6 +115,16 @@ asm(
 Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
+    : Coroutine(machine,
+                [functor = std::move(functor)](const Coroutine &c) {
+                  functor(const_cast<Coroutine *>(&c));
+                },
+                std::move(name), interrupt_fd, autostart, stack_size,
+                user_data) {}
+
+Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
+                     std::string name, int interrupt_fd, bool autostart,
+                     size_t stack_size, void *user_data)
     : scheduler_(machine), function_(std::move(functor)),
       interrupt_fd_(interrupt_fd), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
@@ -191,7 +201,7 @@ const char *Coroutine::StateName(State state) {
   return "unknown";
 }
 
-void Coroutine::SetState(State state) {
+void Coroutine::SetState(State state) const {
   if (state == state_) {
     return;
   }
@@ -292,7 +302,7 @@ static int MakeTimer(uint64_t ns) {
 #endif
 }
 
-int Coroutine::EndOfWait(int timer_fd) {
+int Coroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
     close(timer_fd);
@@ -304,7 +314,7 @@ int Coroutine::EndOfWait(int timer_fd) {
   return wait_result_;
 }
 
-int Coroutine::AddTimeout(uint64_t timeout_ns) {
+int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   int timer_fd = -1;
   if (timeout_ns > 0) {
     timer_fd = MakeTimer(timeout_ns);
@@ -318,7 +328,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) {
   return timer_fd;
 }
 
-int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
+int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
 #if POLL_MODE == POLL_EPOLL
   wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
   if (interrupt_fd_ != -1) {
@@ -349,7 +359,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
 }
 
 int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
-                    uint64_t timeout_ns) {
+                    uint64_t timeout_ns) const {
 #if POLL_MODE == POLL_EPOLL
   for (auto &fd : fds) {
     wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
@@ -384,7 +394,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
 }
 
 #if POLL_MODE == POLL_EPOLL
-int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
+int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   for (auto &fd : fds) {
     wait_fds_.push_back(CoroutineFd(this, fd.fd, fd.events));
   }
@@ -407,7 +417,7 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
   return EndOfWait(timer_fd);
 }
 #else
-int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
+int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
   wait_fds_.push_back(fd);
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
@@ -430,7 +440,7 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) {
 }
 
 int Coroutine::Wait(const std::vector<struct pollfd> &fds,
-                    uint64_t timeout_ns) {
+                    uint64_t timeout_ns) const {
   SetState(State::kCoWaiting);
   for (auto &fd : fds) {
     wait_fds_.push_back(fd);
@@ -454,13 +464,13 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
 }
 #endif
 
-void Coroutine::Nanosleep(uint64_t ns) {
+void Coroutine::Nanosleep(uint64_t ns) const {
   int timer = MakeTimer(ns);
   Wait(timer);
   close(timer);
 }
 
-void Coroutine::TriggerEvent() {
+void Coroutine::TriggerEvent() const {
 #if POLL_MODE == POLL_EPOLL
   co::TriggerEvent(yield_fd_.fd);
 #else
@@ -468,7 +478,7 @@ void Coroutine::TriggerEvent() {
 #endif
 }
 
-void Coroutine::ClearEvent() {
+void Coroutine::ClearEvent() const {
 #if POLL_MODE == POLL_EPOLL
   co::ClearEvent(yield_fd_.fd);
 #else
@@ -523,7 +533,7 @@ void Coroutine::Show() const {
 
 bool Coroutine::IsAlive() const { return scheduler_.IdExists(id_); }
 
-void Coroutine::CallNonTemplate(Coroutine &callee) {
+void Coroutine::CallNonTemplate(Coroutine &callee) const {
   // Start the callee running if it's not already running.  If it's running
   // we trigger its event to wake it up.
   if (callee.state_ == State::kCoNew) {
@@ -547,7 +557,7 @@ void Coroutine::CallNonTemplate(Coroutine &callee) {
   callee.caller_ = nullptr;
 }
 
-void Coroutine::Yield() {
+void Coroutine::Yield() const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoYielded);
@@ -567,7 +577,7 @@ void Coroutine::Yield() {
   // sleep, use the various Sleep functions.
 }
 
-void Coroutine::YieldNonTemplate() {
+void Coroutine::YieldNonTemplate() const {
   if (caller_ != nullptr) {
     // Tell caller that there's a value available.
     caller_->TriggerEvent();
@@ -588,7 +598,7 @@ void Coroutine::YieldNonTemplate() {
   // We get here when resumed from another call.
 }
 
-void Coroutine::InvokeFunction() { function_(this); }
+void Coroutine::InvokeFunction() { function_(*this); }
 
 // We use an intermediate function to do the invocation of
 // the coroutine's function because we really want to avoid

@@ -55,7 +55,7 @@
 #define CTX_MODE CTX_UCONTEXT
 #include <sys/epoll.h>
 #include <ucontext.h>
-#define POLL_MODE POLL_EPOLL                // Change this line to disable epoll
+#define POLL_MODE POLL_EPOLL // Change this line to disable epoll
 #else
 // Portable version is setjmp/longjmp
 #define CTX_MODE CTX_SETJMP
@@ -85,11 +85,25 @@ class CoroutineScheduler;
 class Coroutine;
 template <typename T> class Generator;
 
+// Older versions of this library pass a raw pointer to a Coroutine
+// to the functor.  This is because it was first written in C
+// and I made a mistake not to change it to a reference in the C++
+// version.  It's really the same thing, but modern C++ style prefers
+// references to pointers.
+//
+// This is corrected now and in this version we provide a functor
+// that is passed a const reference to the coroutine.  The pointer
+// version will continue to work but new code should use the reference version.
 using CoroutineFunction = std::function<void(Coroutine *)>;
 using CompletionCallback = std::function<void(Coroutine *)>;
+using CoroutineFunctionRef = std::function<void(const Coroutine &)>;
+using CompletionCallbackRef = std::function<void(const Coroutine &)>;
 
 template <typename T>
 using GeneratorFunction = std::function<void(Generator<T> *)>;
+
+template <typename T>
+using GeneratorFunctionRef = std::function<void(const Generator<T> &)>;
 
 constexpr size_t kCoDefaultStackSize = 32 * 1024;
 
@@ -156,16 +170,33 @@ public:
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
 
+  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+            std::string name = "", int interrupt_fd = -1, bool autostart = true,
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+
+  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+            std::string name, size_t stack_size)
+      : Coroutine(machine, function, name, -1, true,
+                  stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
+  }
+
+  // Options based constructor.
+  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+            CoroutineOptions opts)
+      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+                  opts.autostart,
+                  opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
+                  opts.user_data) {}
   ~Coroutine();
 
   // Start a coroutine running if it is not already running,
   void Start();
 
   // Yield control to another coroutine.
-  void Yield();
+  void Yield() const;
 
   // Call another coroutine and store the result.
-  template <typename T> T Call(Generator<T> &callee);
+  template <typename T> T Call(Generator<T> &callee) const;
 
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
@@ -174,31 +205,32 @@ public:
 
   // Wait for a file descriptor to become ready.  Returns the fd if it
   // was triggered or -1 for timeout.
-  int Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
+  int Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
 
   // Wait for a set of fds, all with the same event mask.
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-           uint64_t timeout_ns = 0);
+           uint64_t timeout_ns = 0) const;
 
 #if POLL_MODE == POLL_EPOLL
-  int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
+  int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
 #else
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-  int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
+  int Wait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
 
   // Wait for a set of pollfds.  Each needs to specify an fd and an event.
   // Returns the fd that was triggered, or -1 for a timeout.
-  int Wait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns = 0);
+  int Wait(const std::vector<struct pollfd> &fds,
+           uint64_t timeout_ns = 0) const;
 #endif
 
   void Exit();
 
   // Sleeping functions.
-  void Nanosleep(uint64_t ns);
-  void Millisleep(time_t msecs) {
+  void Nanosleep(uint64_t ns) const;
+  void Millisleep(time_t msecs) const {
     Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
   }
-  void Sleep(time_t secs) {
+  void Sleep(time_t secs) const {
     Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
   }
 
@@ -249,51 +281,53 @@ private:
   static const char *StateName(State state);
 
   void InvokeFunction();
-  int EndOfWait(int timer_fd);
-  int AddTimeout(uint64_t timeout_ns);
+  int EndOfWait(int timer_fd) const;
+  int AddTimeout(uint64_t timeout_ns) const;
   State GetState() const { return state_; }
 #if POLL_MODE == POLL_POLL
   void AddPollFds(std::vector<struct pollfd> &pollfds,
                   std::vector<Coroutine *> &covec);
 #endif
   void Resume(int value);
-  void TriggerEvent();
-  void ClearEvent();
-  void CallNonTemplate(Coroutine &c);
-  void YieldNonTemplate();
-  void SetState(State state);
+  void TriggerEvent() const;
+  void ClearEvent() const;
+  void CallNonTemplate(Coroutine &c) const;
+  void YieldNonTemplate() const;
+  void SetState(State state) const;
 
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                // Coroutine ID.
-  CoroutineFunction function_; // Coroutine body.
-  std::string name_;           // Optional name.
+  uint32_t id_;                   // Coroutine ID.
+  CoroutineFunctionRef function_; // Coroutine body.
+  std::string name_;              // Optional name.
   int interrupt_fd_;
-  State state_ = State::kCoNew;
-  std::vector<char> stack_;         // Stack, allocated from malloc.
-  void *yielded_address_ = nullptr; // Address at which we've yielded.
+  mutable State state_ = State::kCoNew;
+  std::vector<char> stack_;                 // Stack, allocated from malloc.
+  mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
 #if CTX_MODE == CTX_SETJMP
-  jmp_buf resume_; // Program environemnt for resuming.
-  jmp_buf exit_;   // Program environemt to exit.
+  mutable jmp_buf resume_; // Program environemnt for resuming.
+  mutable jmp_buf exit_;   // Program environemt to exit.
 #else
-  ucontext_t resume_;
-  ucontext_t exit_;
+  mutable ucontext_t resume_;
+  mutable ucontext_t exit_;
 #endif
-  int wait_result_;
-  bool first_resume_ = true;
+  mutable int wait_result_;
+  mutable bool first_resume_ = true;
 
 #if POLL_MODE == POLL_EPOLL
-  CoroutineFd yield_fd_;
-  std::vector<CoroutineFd> wait_fds_;
-  int num_epoll_events_ = 0;
+  mutable CoroutineFd yield_fd_;
+  mutable std::vector<CoroutineFd> wait_fds_;
+  mutable int num_epoll_events_ = 0;
 #else
-  struct pollfd event_fd_;              // Pollfd for event.
-  std::vector<struct pollfd> wait_fds_; // Pollfds for waiting for an fd.
+  mutable struct pollfd event_fd_; // Pollfd for event.
+  mutable std::vector<struct pollfd>
+      wait_fds_; // Pollfds for waiting for an fd.
 #endif
-  Coroutine *caller_ = nullptr; // If being called, who is calling us.
-  void *user_data_;             // User data, not owned by this.
-  uint64_t last_tick_ = 0;      // Tick count of last resume.
+  mutable const Coroutine *caller_ =
+      nullptr;                     // If being called, who is calling us.
+  void *user_data_;                // User data, not owned by this.
+  mutable uint64_t last_tick_ = 0; // Tick count of last resume.
 
   // Function used to create a string for this coroutine.
   std::function<std::string()> to_string_callback_;
@@ -311,20 +345,31 @@ public:
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
       : Coroutine(machine,
-                  [this](Coroutine *c) {
-                    gen_function_(reinterpret_cast<Generator<T> *>(c));
+                  [function = std::move(function)](const Coroutine &c) {
+                    function(reinterpret_cast<Generator<T> *>(
+                        const_cast<Coroutine *>(&c)));
+                  },
+                  name, interrupt_fd, /*autostart=*/false, stack_size,
+                  user_data) {}
+
+  Generator(CoroutineScheduler &machine, GeneratorFunctionRef<T> function,
+            std::string name = "", int interrupt_fd = -1,
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
+      : Coroutine(machine,
+                  [this](const Coroutine &c) {
+                    gen_function_(reinterpret_cast<const Generator<T> &>(c));
                   },
                   name, interrupt_fd, /*autostart=*/false, stack_size,
                   user_data),
         gen_function_(function) {}
 
   // Yield control and store value.
-  void YieldValue(const T &value);
+  void YieldValue(const T &value) const;
 
 private:
   friend class Coroutine;
-  GeneratorFunction<T> gen_function_;
-  T *result_ = nullptr; // Where to put result in YieldValue.
+  GeneratorFunctionRef<T> gen_function_;
+  mutable T *result_ = nullptr; // Where to put result in YieldValue.
 };
 
 struct PollState {
@@ -418,7 +463,8 @@ private:
   CompletionCallback completion_callback_;
 };
 
-template <typename T> inline void Generator<T>::YieldValue(const T &value) {
+template <typename T>
+inline void Generator<T>::YieldValue(const T &value) const {
   // Copy value.
   if (result_ != nullptr) {
     *result_ = value;
@@ -426,7 +472,7 @@ template <typename T> inline void Generator<T>::YieldValue(const T &value) {
   YieldNonTemplate();
 }
 
-template <typename T> inline T Coroutine::Call(Generator<T> &callee) {
+template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
   T result;
   // Tell the callee that it's being called and where to store the value.
   callee.caller_ = this;
