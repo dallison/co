@@ -622,7 +622,7 @@ void Coroutine::Resume(int value) const {
     yielded_address_ = nullptr;
 #if CTX_MODE == CTX_SETJMP
     if (setjmp(exit_) == 0) {
-      void *sp = reinterpret_cast<char *>(stack_.data()) + stack_.size();
+      const void *sp = reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
 
 // clang-format off
