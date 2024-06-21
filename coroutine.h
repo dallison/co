@@ -116,8 +116,8 @@ template <typename T> class Generator;
 
 struct CoroutineFd {
   CoroutineFd() = default;
-  CoroutineFd(Coroutine *c, int f, uint32_t e = 0) : co(c), fd(f), events(e) {}
-  Coroutine *co = nullptr;
+  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0) : co(c), fd(f), events(e) {}
+  const Coroutine *co = nullptr;
   int fd = -1;
   uint32_t events = 0;
 };
@@ -288,7 +288,7 @@ private:
   void AddPollFds(std::vector<struct pollfd> &pollfds,
                   std::vector<Coroutine *> &covec);
 #endif
-  void Resume(int value);
+  void Resume(int value) const;
   void TriggerEvent() const;
   void ClearEvent() const;
   void CallNonTemplate(Coroutine &c) const;
@@ -390,7 +390,7 @@ public:
   void Stop();
 
   void AddCoroutine(Coroutine *c);
-  void RemoveCoroutine(Coroutine *c);
+  void RemoveCoroutine(const Coroutine *c);
   void StartCoroutine(Coroutine *c);
 
 #if POLL_MODE == POLL_POLL

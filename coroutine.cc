@@ -609,7 +609,7 @@ extern "C" {
 void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
-void Coroutine::Resume(int value) {
+void Coroutine::Resume(int value) const {
   switch (state_) {
   case State::kCoReady:
     // Initial invocation of the coroutine.  We need to do a bit
@@ -992,7 +992,7 @@ void CoroutineScheduler::AddCoroutine(Coroutine *c) {
 // Removes a coroutine but doesn't destruct it.  The coroutines's id will
 // be removed and can be reused immediately after the completion callback
 // is called.
-void CoroutineScheduler::RemoveCoroutine(Coroutine *c) {
+void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) {
   coroutine_ids_.Free(c->Id());
   last_freed_coroutine_id_ = c->Id();
 
@@ -1001,7 +1001,7 @@ void CoroutineScheduler::RemoveCoroutine(Coroutine *c) {
       coroutines_.erase(it);
       // Call completion callback to allow for external memory management.
       if (completion_callback_ != nullptr) {
-        completion_callback_(c);
+        completion_callback_(const_cast<Coroutine*>(c));
       }
       break;
     }
