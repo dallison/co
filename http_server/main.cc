@@ -253,7 +253,7 @@ void Listener(co::Coroutine *c) {
 #if defined(__APPLE__)
                              .sin_len = sizeof(int),
 #endif
-                             .sin_addr.s_addr = INADDR_ANY};
+                             .sin_addr = {.s_addr = INADDR_ANY}};
   int e = bind(s, (struct sockaddr *)&addr, sizeof(addr));
   if (e == -1) {
     perror("bind");
