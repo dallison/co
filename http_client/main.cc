@@ -232,7 +232,7 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
 #if defined(__APPLE__)
                              .sin_len = sizeof(int),
 #endif
-                             .sin_addr.s_addr = ipaddr};
+                             .sin_addr = {.s_addr = ipaddr}};
   int e = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
   if (e != 0) {
     close(fd);
