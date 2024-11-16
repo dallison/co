@@ -75,7 +75,7 @@ static void ClearEvent(int fd) {
 #endif
 }
 
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
 extern "C" {
 // Linux, when building optimized ever-so-helpfully replaces
 // longjmp with longjmp_chk unless _FORTIFY_SOURCE is not defined.
@@ -138,7 +138,7 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
 
   stack_.resize(stack_size);
 
-#if CTX_MODE == CTX_UCONTEXT
+#if CO_CTX_MODE == CO_CTX_UCONTEXT
   getcontext(&resume_);
   resume_.uc_stack.ss_sp = stack_.data();
   resume_.uc_stack.ss_size = stack_.size();
@@ -147,7 +147,7 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
   makecontext(&resume_, func, 1, this);
 #endif
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   int efd = NewEventFd();
   if (efd == -1) {
     fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
@@ -176,7 +176,7 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
 }
 
 Coroutine::~Coroutine() {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   CloseEventFd(yield_fd_.fd);
 #else
   CloseEventFd(event_fd_.fd);
@@ -209,7 +209,7 @@ void Coroutine::SetState(State state) const {
     std::cerr << Name() << " moving from state " << StateName(state_) << " to "
               << StateName(state) << std::endl;
   }
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   // In epoll mode we manipulate the epoll fd set based on the state
   // we are leaving and that we are entering.
 
@@ -257,7 +257,7 @@ void Coroutine::SetState(State state) const {
 }
 
 void Coroutine::Exit() {
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   __real_longjmp(exit_, 1);
 #else
   setcontext(&exit_);
@@ -318,7 +318,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   int timer_fd = -1;
   if (timeout_ns > 0) {
     timer_fd = MakeTimer(timeout_ns);
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
     wait_fds_.push_back(CoroutineFd(this, timer_fd, EPOLLIN));
 #else
     struct pollfd timerfd = {.fd = timer_fd, .events = POLLIN};
@@ -329,7 +329,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
 }
 
 int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
   if (interrupt_fd_ != -1) {
     wait_fds_.push_back(CoroutineFd(this, interrupt_fd_, EPOLLIN));
@@ -347,7 +347,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
   }
@@ -360,7 +360,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
 
 int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
                     uint64_t timeout_ns) const {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   for (auto &fd : fds) {
     wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
   }
@@ -382,7 +382,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
 
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
   }
@@ -393,7 +393,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   return EndOfWait(timer_fd);
 }
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
 int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   for (auto &fd : fds) {
     wait_fds_.push_back(CoroutineFd(this, fd.fd, fd.events));
@@ -406,7 +406,7 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
 
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
   }
@@ -428,7 +428,7 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
 
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
   }
@@ -452,7 +452,7 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
   }
@@ -471,7 +471,7 @@ void Coroutine::Nanosleep(uint64_t ns) const {
 }
 
 void Coroutine::TriggerEvent() const {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   co::TriggerEvent(yield_fd_.fd);
 #else
   co::TriggerEvent(event_fd_.fd);
@@ -479,14 +479,14 @@ void Coroutine::TriggerEvent() const {
 }
 
 void Coroutine::ClearEvent() const {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   co::ClearEvent(yield_fd_.fd);
 #else
   co::ClearEvent(event_fd_.fd);
 #endif
 }
 
-#if POLL_MODE == POLL_POLL
+#if CO_POLL_MODE == CO_POLL_POLL
 void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
                            std::vector<Coroutine *> &covec) {
   switch (state_) {
@@ -543,7 +543,7 @@ void Coroutine::CallNonTemplate(Coroutine &callee) const {
   }
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
@@ -562,7 +562,7 @@ void Coroutine::Yield() const {
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoYielded);
   TriggerEvent();
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
@@ -587,7 +587,7 @@ void Coroutine::YieldNonTemplate() const {
   // This will be done when another call is made.
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   if (setjmp(resume_) == 0) {
     __real_longjmp(scheduler_.YieldBuf(), 1);
     // Never get here.
@@ -620,7 +620,7 @@ void Coroutine::Resume(int value) const {
     // CoroutineScheduler.
     SetState(State::kCoRunning);
     yielded_address_ = nullptr;
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
     if (setjmp(exit_) == 0) {
       const void *sp = reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
@@ -692,7 +692,7 @@ void Coroutine::Resume(int value) const {
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
     __real_longjmp(resume_, 1);
 #else
     setcontext(&resume_);
@@ -704,7 +704,7 @@ void Coroutine::Resume(int value) const {
     // Should never get here.
     break;
   case State::kCoDead:
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
     __real_longjmp(exit_, 1);
 #else
     setcontext(&exit_);
@@ -714,7 +714,7 @@ void Coroutine::Resume(int value) const {
 }
 
 CoroutineScheduler::CoroutineScheduler() {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   interrupt_fd_ = NewEventFd();
   epoll_fd_ = epoll_create1(0);
   if (epoll_fd_ == -1) {
@@ -729,7 +729,7 @@ CoroutineScheduler::CoroutineScheduler() {
 }
 
 CoroutineScheduler::~CoroutineScheduler() {
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   close(epoll_fd_);
   close(interrupt_fd_);
 #else
@@ -737,7 +737,7 @@ CoroutineScheduler::~CoroutineScheduler() {
 #endif
 }
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
 CoroutineFd *CoroutineScheduler::ChooseRunnable(
     const std::vector<struct epoll_event> &events, int num_ready) {
   CoroutineFd *chosen = nullptr;
@@ -904,7 +904,7 @@ CoroutineFd CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state,
 
 void CoroutineScheduler::Run() {
   running_ = true;
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> events;
 #endif
 
@@ -913,7 +913,7 @@ void CoroutineScheduler::Run() {
       // No coroutines, nothing to do.
       break;
     }
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
     setjmp(yield_);
 #else
     getcontext(&yield_);
@@ -923,7 +923,7 @@ void CoroutineScheduler::Run() {
     }
 
 // We get here any time a coroutine yields or waits.
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
     events.resize(num_epoll_events_);
     int num_ready = epoll_wait(epoll_fd_, events.data(), events.size(), -1);
     if (num_ready <= 0) {
@@ -962,7 +962,7 @@ void CoroutineScheduler::Run() {
   }
 }
 
-#if POLL_MODE == POLL_POLL
+#if CO_POLL_MODE == CO_POLL_POLL
 void CoroutineScheduler::GetPollState(PollState *poll_state) {
   BuildPollFds(poll_state);
 }
@@ -1022,7 +1022,7 @@ uint32_t CoroutineScheduler::AllocateId() {
 
 void CoroutineScheduler::Stop() {
   running_ = false;
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   TriggerEvent(interrupt_fd_);
 #else
   TriggerEvent(interrupt_fd_.fd);

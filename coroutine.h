@@ -15,8 +15,8 @@
 // if the OS providers are going to remove features.  They seem
 // to be forcing everything into threads, which is the antithesis
 // of coroutines.
-#define CTX_SETJMP 1
-#define CTX_UCONTEXT 2
+#define CO_CTX_SETJMP 1
+#define CO_CTX_UCONTEXT 2
 
 // Do we use ::poll or ::epoll?  The epoll system call is Linux only and
 // can improve performance.
@@ -34,8 +34,8 @@
 // By default POLL_EPOLL is used on Linux and POLL_POLL on all other OSes.
 // If you don't want to use POLL_EPOLL on Linux, modify the setting of
 // POLL_MODE inside the defined(__linux__) below.
-#define POLL_EPOLL 1
-#define POLL_POLL 2
+#define CO_POLL_EPOLL 1
+#define CO_POLL_POLL 2
 
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
@@ -47,8 +47,8 @@
 // use of TSAN in something that uses coroutines, you have to
 // use user contexts.
 #if defined(__APPLE__)
-#define CTX_MODE CTX_SETJMP
-#define POLL_MODE POLL_POLL
+#define CO_CTX_MODE CO_CTX_SETJMP
+#define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
 #elif defined(__linux__)
 // Linux supports user contexts.  Let's use them so that tsan works.
@@ -65,7 +65,7 @@
 
 #include <poll.h>
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
 #include "absl/container/flat_hash_map.h"
 #endif
 
@@ -130,7 +130,7 @@ struct CoroutineOptions {
   void *user_data = nullptr;
 };
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
 // This is to provide the epoll equivalent of waiting for a set
 // of pollfds
 struct WaitFd {
@@ -211,7 +211,7 @@ public:
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
            uint64_t timeout_ns = 0) const;
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
 #else
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
@@ -284,7 +284,7 @@ private:
   int EndOfWait(int timer_fd) const;
   int AddTimeout(uint64_t timeout_ns) const;
   State GetState() const { return state_; }
-#if POLL_MODE == POLL_POLL
+#if CO_POLL_MODE == CO_POLL_POLL
   void AddPollFds(std::vector<struct pollfd> &pollfds,
                   std::vector<Coroutine *> &covec);
 #endif
@@ -305,7 +305,7 @@ private:
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   mutable jmp_buf resume_; // Program environemnt for resuming.
   mutable jmp_buf exit_;   // Program environemt to exit.
 #else
@@ -315,7 +315,7 @@ private:
   mutable int wait_result_;
   mutable bool first_resume_ = true;
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   mutable CoroutineFd yield_fd_;
   mutable std::vector<CoroutineFd> wait_fds_;
   mutable int num_epoll_events_ = 0;
@@ -393,7 +393,7 @@ public:
   void RemoveCoroutine(const Coroutine *c);
   void StartCoroutine(Coroutine *c);
 
-#if POLL_MODE == POLL_POLL
+#if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
   // functions allow you to incorporate the multiplexed
   // IO into your own poll loop.
@@ -418,7 +418,7 @@ private:
   friend class Coroutine;
   template <typename T> friend class Generator;
 
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   CoroutineFd *ChooseRunnable(const std::vector<struct epoll_event> &events,
                               int num_ready);
   CoroutineFd *
@@ -435,7 +435,7 @@ private:
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   jmp_buf &YieldBuf() { return yield_; }
 #else
   ucontext_t *YieldCtx() { return &yield_; }
@@ -444,13 +444,13 @@ private:
   std::list<Coroutine *> coroutines_;
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
-#if CTX_MODE == CTX_SETJMP
+#if CO_CTX_MODE == CO_CTX_SETJMP
   jmp_buf yield_;
 #else
   ucontext_t yield_;
 #endif
   bool running_ = false;
-#if POLL_MODE == POLL_EPOLL
+#if CO_POLL_MODE == CO_POLL_EPOLL
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
