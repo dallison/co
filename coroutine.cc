@@ -737,8 +737,8 @@ void Coroutine::GetAllFds(std::vector<int>& fds) const {
     fds.push_back(yield_fd_.fd);
   }
 #else
-  if (event_fd.fd != -1) {
-    fds.push_back(event_fd.fd);
+  if (event_fd_.fd != -1) {
+    fds.push_back(event_fd_.fd);
   }
 #endif
   if (state_ == State::kCoWaiting) {
