@@ -247,12 +247,6 @@ void Coroutine::SetState(State state) const {
     }
     break;
   case State::kCoYielded:
-    std::cerr << "yield fd: " << yield_fd_.fd << std::endl;
-                char cmd[256];
-        snprintf(cmd, sizeof(cmd), "ls -l /proc/%d/fd/%d", getpid(), yield_fd_.fd);
-        system(cmd);
-
-
     scheduler_.AddEpollFd(&yield_fd_, EPOLLIN);
     break;
   case State::kCoDead:
