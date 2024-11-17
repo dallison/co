@@ -247,6 +247,12 @@ void Coroutine::SetState(State state) const {
     }
     break;
   case State::kCoYielded:
+    std::cerr << "yield fd: " << yield_fd_.fd << std::endl;
+                char cmd[256];
+        snprintf(cmd, sizeof(cmd), "ls -l /proc/%d/fd/%d", getpid(), yield_fd_.fd);
+        system(cmd);
+
+
     scheduler_.AddEpollFd(&yield_fd_, EPOLLIN);
     break;
   case State::kCoDead:
@@ -577,6 +583,18 @@ void Coroutine::Yield() const {
   // sleep, use the various Sleep functions.
 }
 
+void Coroutine::YieldToScheduler() const {
+  SetState(State::kCoYielded);
+#if CO_CTX_MODE == CO_CTX_SETJMP
+  if (setjmp(resume_) == 0) {
+    __real_longjmp(scheduler_.YieldBuf(), 1);
+    // Never get here.
+  }
+#else
+  swapcontext(&resume_, scheduler_.YieldCtx());
+#endif
+}
+
 void Coroutine::YieldNonTemplate() const {
   if (caller_ != nullptr) {
     // Tell caller that there's a value available.
@@ -710,6 +728,23 @@ void Coroutine::Resume(int value) const {
     setcontext(&exit_);
 #endif
     break;
+  }
+}
+
+void Coroutine::GetAllFds(std::vector<int>& fds) const {
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  if (yield_fd_.fd != -1) {
+    fds.push_back(yield_fd_.fd);
+  }
+#else
+  if (event_fd.fd != -1) {
+    fds.push_back(event_fd.fd);
+  }
+#endif
+  if (state_ == State::kCoWaiting) {
+    for (auto &fd : wait_fds_) {
+      fds.push_back(fd.fd);
+    }
   }
 }
 
@@ -1042,5 +1077,20 @@ std::vector<std::string> CoroutineScheduler::AllCoroutineStrings() const {
   }
   return r;
 }
+
+std::vector<int> CoroutineScheduler::GetAllFds() const {
+  std::vector<int> fds;
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  fds.push_back(epoll_fd_);
+  fds.push_back(interrupt_fd_);
+#else
+  fds.push_back(interrupt_fd_.fd);
+#endif
+  for (auto* co : coroutines_) {
+    co->GetAllFds(fds);
+  }
+  return fds;
+}
+
 
 } // namespace co
