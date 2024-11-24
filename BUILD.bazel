@@ -35,7 +35,9 @@ cc_library(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//conditions:default": ["@com_google_absl//absl/container:flat_hash_map"],
-    }),
+    }) + [
+        "@com_google_absl//absl/container:flat_hash_set"
+    ],
 )
 
 cc_binary(

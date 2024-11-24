@@ -29,14 +29,20 @@
 
 constexpr bool kCoDebug = false;
 
-#if CO_CTX_MODE == CO_CTX_UCONTEXT
-#define SETCONTEXT setcontext
-#define GETCONTEXT getcontext
-#define SWAPCONTEXT swapcontext
+#if CO_CTX_MODE == CO_CTX_SETJMP
+#define SETCONTEXT(ctx) __real_longjmp(ctx, 1)
+#define GETCONTEXT(ctx) setjmp(ctx)
+#define SWAPCONTEXT(from, to)   if (setjmp(from) == 0) { \
+    __real_longjmp(to, 1); \
+  }
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+#define SETCONTEXT(ctx) setcontext(&ctx)
+#define GETCONTEXT(ctx) getcontext(&ctx)
+#define SWAPCONTEXT(from, to) swapcontext(&from, &to)
 #else
-#define SETCONTEXT CoroutineSetContext
-#define GETCONTEXT CoroutineGetContext
-#define SWAPCONTEXT CoroutineSwapContext
+#define SETCONTEXT(ctx) CoroutineSetContext(&ctx)
+#define GETCONTEXT(ctx) CoroutineGetContext(&ctx)
+#define SWAPCONTEXT(from, to) CoroutineSwapContext(&from, &to)
 #endif
 
 namespace co {
@@ -274,11 +280,7 @@ void Coroutine::SetState(State state) const {
 }
 
 void Coroutine::Exit() {
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  __real_longjmp(exit_, 1);
-#else
-  SETCONTEXT(&exit_);
-#endif
+  SETCONTEXT(exit_);
 }
 
 void Coroutine::Start() {
@@ -364,13 +366,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -398,14 +394,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
-
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -422,14 +411,8 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -444,14 +427,8 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -469,13 +446,8 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -560,14 +532,8 @@ void Coroutine::CallNonTemplate(Coroutine &callee) const {
   }
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
 
   // When we get here, the callee has done its work.  Remove this coroutine's
   // state from it.
@@ -579,14 +545,7 @@ void Coroutine::Yield() const {
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoYielded);
   TriggerEvent();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
   // We get here when resumed.  We ignore the result of setjmp as we
   // are not waiting for anything and there is no yield with timeout
@@ -596,14 +555,7 @@ void Coroutine::Yield() const {
 
 void Coroutine::YieldToScheduler() const {
   SetState(State::kCoYielded);
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 }
 
 void Coroutine::YieldNonTemplate() const {
@@ -616,14 +568,8 @@ void Coroutine::YieldNonTemplate() const {
   // This will be done when another call is made.
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  SWAPCONTEXT(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
   // We get here when resumed from another call.
 }
 
@@ -698,14 +644,14 @@ void Coroutine::Resume(int value) const {
       // clang-format on
     }
 #else
-    GETCONTEXT(&exit_);
+    GETCONTEXT(exit_);
     // We will get here when the coroutines's function returns.
     if (first_resume_) {
       first_resume_ = false;
       // This is the first time we have been resumed so set the context
       // to that set up by makecontext.  This will set the stack and invoke
       // the function.
-      SETCONTEXT(&resume_);
+      SETCONTEXT(resume_);
     }
 #endif
 
@@ -716,22 +662,14 @@ void Coroutine::Resume(int value) const {
     // Functor returned, we are dead.
     SetState(State::kCoDead);
     scheduler_.RemoveCoroutine(this);
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-#else
     SETCONTEXT(scheduler_.YieldCtx());
-#endif
     break;
   case State::kCoYielded:
     [[fallthrough]];
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    __real_longjmp(resume_, 1);
-#else
-    SETCONTEXT(&resume_);
-#endif
+    SETCONTEXT(resume_);
     break;
   case State::kCoRunning:
     [[fallthrough]];
@@ -739,11 +677,7 @@ void Coroutine::Resume(int value) const {
     // Should never get here.
     break;
   case State::kCoDead:
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    __real_longjmp(exit_, 1);
-#else
-    SETCONTEXT(&exit_);
-#endif
+    SETCONTEXT(exit_);
     break;
   }
 }
@@ -963,11 +897,7 @@ void CoroutineScheduler::Run() {
 
     // Build the context/jmp_buf for the yield.  This is where coroutines
     // will yield to.
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    setjmp(yield_);
-#else
-    GETCONTEXT(&yield_);
-#endif
+    GETCONTEXT(yield_);
 
     // This loop resumes all ready coroutines once each.  It allows
     // the scheduler to scale linearly with the number of ready

@@ -52,7 +52,7 @@
 // use of TSAN in something that uses coroutines, you have to
 // use user contexts.
 #if defined(__APPLE__)
-#define CO_CTX_MODE CO_CTX_CUSTOM
+#define CO_CTX_MODE CO_CTX_SETJMP
 #define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
 #elif defined(__linux__)
@@ -72,6 +72,16 @@
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 #include "absl/container/flat_hash_map.h"
+#endif
+#include "absl/container/flat_hash_set.h"
+
+// Define the alias 'Context' for the context structure.
+#if CO_CTX_MODE == CO_CTX_SETJMP
+using Context = jmp_buf;
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+using Context = ucontext_t;
+#else
+using Context = co::CoroutineContext;
 #endif
 
 #include <cstdint>
@@ -316,17 +326,8 @@ private:
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  mutable jmp_buf resume_; // Program environemnt for resuming.
-  mutable jmp_buf exit_;   // Program environemt to exit.
-#elif CO_CTX_MODE == CO_CTX_UCONTEXT
-  mutable ucontext_t resume_;
-  mutable ucontext_t exit_;
-#else
-  // CO_CTX_CUSTOM
-  mutable CoroutineContext resume_;
-  mutable CoroutineContext exit_;
-#endif
+  mutable Context resume_;
+  mutable Context exit_;
   mutable int wait_result_;
   mutable bool first_resume_ = true;
 
@@ -444,28 +445,13 @@ private:
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  jmp_buf &YieldBuf() { return yield_; }
-#elif CO_CTX_MODE == CO_CTX_CUSTOM
-  CoroutineContext *YieldCtx() { return &yield_; }  
-#else
-  ucontext_t *YieldCtx() { return &yield_; }
-#endif
-
+  Context& YieldCtx() { return yield_; }
   void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  jmp_buf yield_;
-#elif CO_CTX_MODE == CO_CTX_UCONTEXT
-  ucontext_t yield_;
-#else
-  // CO_CTX_CUSTOM
-  char pad[8];
-  CoroutineContext yield_;
-#endif
+  Context yield_;
   bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int epoll_fd_ = -1;
@@ -478,7 +464,7 @@ private:
 #endif
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
-  std::set<const Coroutine *> deletions_;
+  absl::flat_hash_set<const Coroutine *> deletions_;
 };
 
 template <typename T>
