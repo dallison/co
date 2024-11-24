@@ -20,10 +20,12 @@ cc_library(
     name = "co",
     srcs = [
         "coroutine.cc",
+        "context.S",
     ],
     hdrs = [
         "bitset.h",
         "coroutine.h",
+        "context.h",
     ],
     copts = [
         "-Wall",
@@ -56,6 +58,17 @@ cc_test(
     name = "test_coroutines",
     srcs = [
         "test_coroutines.cc",
+    ],
+    deps = [
+        ":co",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "coroutines_test",
+    srcs = [
+        "coroutines_test.cc",
     ],
     deps = [
         ":co",
