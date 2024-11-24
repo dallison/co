@@ -2,21 +2,25 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef coroutine_h
-#define coroutine_h
+#pragma once
 
-// We have two modes of context switches available.  The most
-// portable is using setjmp/longjmp with a little assembly
-// language to switch stacks for the first call.  There is
-// also user contexts which is a System V facility that is
-// available on Linux and other operating systems.
+// We have three modes of context switches available.
+// 1. using setjmp/longjmp with a little assembly
+//   language to switch stacks for the first call.
+// 2. user contexts which is a System V facility that is
+//     available on Linux and other operating systems.
+// 3. A custom context switcher written in assmebly language for
+//    x86_64 and aarch64.
 //
-// TODO: maybe I need to write my own context switching functions
-// if the OS providers are going to remove features.  They seem
-// to be forcing everything into threads, which is the antithesis
-// of coroutines.
+//
+// Which one to use?  The custom context switcher is the fastest but may
+// not work on your architecture.  The setjmp/longjmp is the most portable
+// but might cause issues if the system library intercepts longjmp.
+// The user contexts are disabled on MacOS and also cause issues with
+// ASAN.
 #define CO_CTX_SETJMP 1
 #define CO_CTX_UCONTEXT 2
+#define CO_CTX_CUSTOM 3
 
 // Do we use ::poll or ::epoll?  The epoll system call is Linux only and
 // can improve performance.
@@ -37,6 +41,7 @@
 #define CO_POLL_EPOLL 1
 #define CO_POLL_POLL 2
 
+#include "context.h"
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -47,7 +52,7 @@
 // use of TSAN in something that uses coroutines, you have to
 // use user contexts.
 #if defined(__APPLE__)
-#define CO_CTX_MODE CO_CTX_SETJMP
+#define CO_CTX_MODE CO_CTX_CUSTOM
 #define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
 #elif defined(__linux__)
@@ -74,6 +79,7 @@
 #include <ctime>
 #include <functional>
 #include <list>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -116,7 +122,8 @@ template <typename T> class Generator;
 
 struct CoroutineFd {
   CoroutineFd() = default;
-  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0) : co(c), fd(f), events(e) {}
+  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0)
+      : co(c), fd(f), events(e) {}
   const Coroutine *co = nullptr;
   int fd = -1;
   uint32_t events = 0;
@@ -187,6 +194,7 @@ public:
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
+
   ~Coroutine();
 
   // Start a coroutine running if it is not already running,
@@ -265,7 +273,7 @@ public:
   // this will be the same as that printed by Show().
   std::string ToString() const;
 
-  void GetAllFds(std::vector<int>& fds) const;
+  void GetAllFds(std::vector<int> &fds) const;
 
 private:
   enum class State {
@@ -301,9 +309,9 @@ private:
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                   // Coroutine ID.
+  uint32_t id_;                    // Coroutine ID.
   CoroutineFunctionRef function_; // Coroutine body.
-  std::string name_;              // Optional name.
+  std::string name_;               // Optional name.
   int interrupt_fd_;
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
@@ -311,9 +319,13 @@ private:
 #if CO_CTX_MODE == CO_CTX_SETJMP
   mutable jmp_buf resume_; // Program environemnt for resuming.
   mutable jmp_buf exit_;   // Program environemt to exit.
-#else
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
   mutable ucontext_t resume_;
   mutable ucontext_t exit_;
+#else
+  // CO_CTX_CUSTOM
+  mutable CoroutineContext resume_;
+  mutable CoroutineContext exit_;
 #endif
   mutable int wait_result_;
   mutable bool first_resume_ = true;
@@ -401,7 +413,6 @@ public:
   // functions allow you to incorporate the multiplexed
   // IO into your own poll loop.
   void GetPollState(PollState *poll_state);
-  void ProcessPoll(PollState *poll_state);
 #endif
 
   // Print the state of all the coroutines to stderr.
@@ -424,35 +435,36 @@ private:
   template <typename T> friend class Generator;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  CoroutineFd *ChooseRunnable(const std::vector<struct epoll_event> &events,
-                              int num_ready);
-  CoroutineFd *
-  GetRunnableCoroutine(const std::vector<struct epoll_event> &events,
-                       int num_ready);
   void AddEpollFd(int fd, uint32_t events);
   void AddEpollFd(CoroutineFd *cfd, uint32_t events);
   void RemoveEpollFd(CoroutineFd *cfd);
 #else
   void BuildPollFds(PollState *poll_state);
-  CoroutineFd ChooseRunnable(PollState *poll_state, int num_ready);
-  CoroutineFd GetRunnableCoroutine(PollState *poll_state, int num_ready);
 #endif
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
 #if CO_CTX_MODE == CO_CTX_SETJMP
   jmp_buf &YieldBuf() { return yield_; }
+#elif CO_CTX_MODE == CO_CTX_CUSTOM
+  CoroutineContext *YieldCtx() { return &yield_; }  
 #else
   ucontext_t *YieldCtx() { return &yield_; }
 #endif
+
+  void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
 #if CO_CTX_MODE == CO_CTX_SETJMP
   jmp_buf yield_;
-#else
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
   ucontext_t yield_;
+#else
+  // CO_CTX_CUSTOM
+  char pad[8];
+  CoroutineContext yield_;
 #endif
   bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -466,6 +478,7 @@ private:
 #endif
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
+  std::set<const Coroutine *> deletions_;
 };
 
 template <typename T>
@@ -489,4 +502,3 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
 }
 
 } // namespace co
-#endif /* coroutine_h */
