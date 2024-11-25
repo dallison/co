@@ -1,18 +1,22 @@
 #pragma once
 
+// Copyright 2024 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
+
 #include <cstddef>
 
 namespace co {
 
-class Coroutine;
-
+// Custom coroutine context.  Contains the stack and register save area/
+// Needs 16-byte alignment for aarch64.
 struct alignas(16) CoroutineContext {
-  void *stack;
-  size_t stack_size;
-  CoroutineContext *next;
-  char padding[8];
+  void *stack;            // Heap-allocated stack.
+  size_t stack_size;      // Size of the stack in bytes.
+  CoroutineContext *next; // Where to go when coroutine function returns.
+  char padding[8];        // Set size to 32 bytes.
 
-// Offset 32  - 16 byte alignment.
+// See context.S for the layout of the register save area.
 #if defined(__x86_64__)
   char regs[640];
 #elif defined(__aarch64__)
@@ -22,11 +26,12 @@ struct alignas(16) CoroutineContext {
 #endif
 };
 
+// C linkage to allow us to define them in assembly language.
 extern "C" {
-  void CoroutineMakeContext(CoroutineContext * ctx, void (*func)(void *),
-                            void *arg);
-  void CoroutineSwapContext(CoroutineContext * from, CoroutineContext * to);
-  void CoroutineGetContext(CoroutineContext * ctx);
-  void CoroutineSetContext(CoroutineContext * ctx);
+void CoroutineMakeContext(CoroutineContext *ctx, void (*func)(void *),
+                          void *arg);
+void CoroutineSwapContext(CoroutineContext *from, CoroutineContext *to);
+void CoroutineGetContext(CoroutineContext *ctx);
+void CoroutineSetContext(CoroutineContext *ctx);
 }
 } // namespace co

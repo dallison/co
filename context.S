@@ -1,65 +1,76 @@
+// Copyright 2024 David Allison
+// All Rights Reserved
+// See LICENSE file for licensing information.
 
 // Apple puts an underscore prefix for all external symbols.
 #if defined(__APPLE__)
 #define SYM(name) _##name
-#define TYPE(name) .p2align 2
+#define SYM_DATA(name) .p2align 2
 .section        __TEXT,__text,regular,pure_instructions
 
 #elif defined(__linux__)
 .section ".text", "x"
 #define SYM(name) #name
-#define TYPE(name) .type SYM(name), @function
+#define SYM_DATA(name) .type SYM(name), @function
 #else
 #error "Unknown OS"
 #endif
 
 .global SYM(CoroutineMakeContext)
-TYPE(CoroutineMakeContext)
+SYM_DATA(CoroutineMakeContext)
 
 .global SYM(CoroutineSwapContext)
-TYPE(CoroutineSwapContext)
+SYM_DATA(CoroutineSwapContext)
 
 .global SYM(CoroutineGetContext)
-TYPE(CoroutineGetContext)
+SYM_DATA(CoroutineGetContext)
 
 .global SYM(CoroutineSetContext)
-TYPE(CoroutineSetContext)
+SYM_DATA(CoroutineSetContext)
 
 .global SYM(abort)
-TYPE(abort)
+SYM_DATA(abort)
 
-// Register storage area is 24 bytes into context.
+// Register storage area is 32 bytes into context.
 #define reg_start 32
 
+// We only support x86_64 and aarch64.  Other architectures can
+// be added as needed (anyone need SPARC these days?).  ARM is a possibility
+// if anyone needs it.
 
+//
+// See the context.h file for the register offsets in the save are.
+// The names of the offsets are "reg_XX" where "XX" is the register
+// name as defined by the architecture.
 #if defined(__x86_64__)
 
-#define reg_rbx 0+reg_start
-#define reg_rcx 8+reg_start
-#define reg_rdx 16+reg_start
-#define reg_r8 24+reg_start
-#define reg_r9 32+reg_start
-#define reg_r12 40+reg_start
-#define reg_r13 48+reg_start
-#define reg_r14 56+reg_start
-#define reg_r15 64+reg_start
-#define reg_rsp 72+reg_start
-#define reg_rbp 80+reg_start
-#define reg_rsi 88+reg_start
-#define reg_rdi 96+reg_start
-#define reg_rip 104+reg_start
+// Register layout in save area.
+#define reg_rbx 0 + reg_start
+#define reg_rcx 8 + reg_start
+#define reg_rdx 16 + reg_start
+#define reg_r8 24 + reg_start
+#define reg_r9 32 + reg_start
+#define reg_r12 40 + reg_start
+#define reg_r13 48 + reg_start
+#define reg_r14 56 + reg_start
+#define reg_r15 64 + reg_start
+#define reg_rsp 72 + reg_start
+#define reg_rbp 80 + reg_start
+#define reg_rsi 88 + reg_start
+#define reg_rdi 96 + reg_start
+#define reg_rip 104 + reg_start
 
-#define reg_fp 112+reg_start
+#define reg_fp 112 + reg_start
 #define reg_fp_size 512
-#define reg_mxcsr 624+reg_start // 4 bytes
+#define reg_mxcsr 624 + reg_start // 4 bytes
 
-
-2:
+// We get here when the coroutine's function returns.
+1:
   mov 0(%rsp), %rdi
   test %rdi, %rdi
-  je 1f
+  je 2f         // Zero means abort.
   call SYM(CoroutineSetContext)
-1:
+2:
   call SYM(abort)
 
 // Entry:
@@ -81,7 +92,7 @@ SYM(CoroutineMakeContext):
   mov 16(%rdi), %rax        
   mov %rax, 8(%rsi)         // Next context in context
 
-  lea 2b(%rip), %rax       // Place to go when finished.
+  lea 1b(%rip), %rax       // Place to go when finished.
   mov %rax, 0(%rsi)
 
   ret
@@ -89,7 +100,10 @@ SYM(CoroutineMakeContext):
 #define STORE_REG(r) mov %r, reg_##r(%rdi)
 #define LOAD_REG(r) mov reg_##r(%rdi), %r
 
+// Entry:
+// rdi: address of context
 SYM(CoroutineGetContext):
+  // Store all registers in save area.
   STORE_REG(rbx)
   STORE_REG(rcx)
   STORE_REG(rdx)
@@ -104,11 +118,11 @@ SYM(CoroutineGetContext):
   STORE_REG(rdi)
   STORE_REG(rbx)
   
-  // Return address is on Stack
+  // Return address is on stack, get it and store in %rip
   mov (%rsp), %rax
   mov %rax, reg_rip(%rdi)
 
-  // Previous SP is just above return address
+  // Previous SP is just above return address, store this in %rsp
   lea 8(%rsp), %rax
   mov %rax, reg_rsp(%rdi)
 
@@ -118,11 +132,15 @@ SYM(CoroutineGetContext):
   stmxcsr reg_mxcsr(%rdi)
   ret
 
+// Entry:
+// rdi: address of context
 SYM(CoroutineSetContext):
+  // Load floating point save data.
   lea reg_fp(%rdi), %rax
   fldenv (%rax)
   ldmxcsr reg_mxcsr(%rdi)
 
+  // Load registers.
   LOAD_REG(rbx)
   LOAD_REG(rcx)
   LOAD_REG(rdx)
@@ -141,14 +159,19 @@ SYM(CoroutineSetContext):
 
   // Restore rdi.
   mov reg_rdi(%rdi), %rdi
+
+  // Return to pushed return address.
   ret
 
 #undef LOAD_REG
 // Redefine LOAD_REG to load from %rax
 #define LOAD_REG(r) mov reg_##r(%rax), %r
 
-
+// Entry:
+// rdi: 'from' context
+// rsi: 'to' context
 SYM(CoroutineSwapContext):
+  // Store current registers in 'from' context
   STORE_REG(rbx)
   STORE_REG(rcx)
   STORE_REG(rdx)
@@ -163,7 +186,7 @@ SYM(CoroutineSwapContext):
   STORE_REG(rdi)
   STORE_REG(rbx)
   
-  // Return address is on Stack
+  // Return address is on stack, store it in rdi
   mov (%rsp), %rax
   mov %rax, reg_rip(%rdi)
 
@@ -171,19 +194,19 @@ SYM(CoroutineSwapContext):
   lea 8(%rsp), %rax
   mov %rax, reg_rsp(%rdi)
 
-  // Floating point stuff.
+  // Store Floating point stuff.
   lea reg_fp(%rdi), %rax
   fnstenv (%rax)
-  fldenv (%rax)
   stmxcsr reg_mxcsr(%rdi)
 
-  // Get load context in rax
+  // Get 'to' context in rax
   mov %rsi, %rax
 
   lea reg_fp(%rdi), %rsi
   fldenv (%rsi)
   ldmxcsr reg_mxcsr(%rax)
 
+  // Load registers from (rax)
   LOAD_REG(rbx)
   LOAD_REG(rcx)
   LOAD_REG(rdx)
@@ -206,42 +229,47 @@ SYM(CoroutineSwapContext):
 #undef LOAD_REG
 
 #elif defined(__aarch64__)
-#define reg_x18 0+reg_start
-#define reg_x19 8+reg_start
-#define reg_x20 16+reg_start
-#define reg_x21 24+reg_start
-#define reg_x22 32+reg_start
-#define reg_x23 40+reg_start
-#define reg_x24 48+reg_start
-#define reg_x25 56+reg_start
-#define reg_x26 64+reg_start
-#define reg_x27 72+reg_start
-#define reg_x28 80+reg_start
-#define reg_x29 88+reg_start
-#define reg_x30 96+reg_start
-#define reg_sp 104+reg_start
-#define reg_pc 112+reg_start
-#define reg_x0 120+reg_start
 
-#define reg_fpsr 128+reg_start
-#define reg_fpcr 132+reg_start
+// Register layout in save area.
+#define reg_x18 0 + reg_start
+#define reg_x19 8 + reg_start
+#define reg_x20 16 + reg_start
+#define reg_x21 24 + reg_start
+#define reg_x22 32 + reg_start
+#define reg_x23 40 + reg_start
+#define reg_x24 48 + reg_start
+#define reg_x25 56 + reg_start
+#define reg_x26 64 + reg_start
+#define reg_x27 72 + reg_start
+#define reg_x28 80 + reg_start
+#define reg_x29 88 + reg_start
+#define reg_x30 96 + reg_start
+#define reg_sp 104 + reg_start
+#define reg_pc 112 + reg_start
+#define reg_x0 120 + reg_start
 
-// Floating point
-#define reg_q8 160+reg_start
-#define reg_q9 176+reg_start
-#define reg_q10 192+reg_start
-#define reg_q11 208+reg_start
-#define reg_q12 224+reg_start
-#define reg_q13 240+reg_start
-#define reg_q14 256+reg_start
-#define reg_q15 272+reg_start
+// Floating point status and control.
+#define reg_fpsr 128 + reg_start
+#define reg_fpcr 132 + reg_start
 
-2:
+// Floating point registers.
+#define reg_q8 160 + reg_start
+#define reg_q9 176 + reg_start
+#define reg_q10 192 + reg_start
+#define reg_q11 208 + reg_start
+#define reg_q12 224 + reg_start
+#define reg_q13 240 + reg_start
+#define reg_q14 256 + reg_start
+#define reg_q15 272 + reg_start
+
+// This is the address that the coroutine returns to when
+// its function is done.  The context address is in x19.
+1:
   mov x0, x19
-  cbz x0, 1f
+  cbz x0, 2f      // Must not be zero, or we abort.
   b SYM(CoroutineSetContext)
 
-1:
+2:
   b SYM(abort)
 
 // Entry:
@@ -262,7 +290,7 @@ SYM(CoroutineMakeContext):
   ldr x1, [x0, #16]   // next context
   str x1, [x0, #reg_x19]    // x19 is used by return context
   str xzr, [x0, #reg_x29]   // No frame pointer
-  adr x1, 2b
+  adr x1, 1b
   str x1, [x0, #reg_x30]      // link reg
   ret
 
@@ -271,6 +299,8 @@ SYM(CoroutineMakeContext):
 #define LOAD_REG(r) ldr r, [x0, # (reg_##r)]
 #define LOAD_PAIR(r1, r2) ldp r1, r2, [x0, # (reg_##r1)]
 
+// Entry:
+// x0: address of context
 SYM(CoroutineGetContext):
   STORE_PAIR(x18, x19)
   STORE_PAIR(x20, x21)
@@ -279,6 +309,7 @@ SYM(CoroutineGetContext):
   STORE_PAIR(x26, x27)
   STORE_PAIR(x28, x29)
   STORE_REG(x30)
+  // Also store link register as PC for return.
   str x30, [x0, #reg_pc]  
 
   mov x2, sp
@@ -295,7 +326,8 @@ SYM(CoroutineGetContext):
   str w2, [x0, #reg_fpcr]
   ret
 
-
+// Entry:
+// x0: address of context
 SYM(CoroutineSetContext):
   LOAD_PAIR(x18, x19)
   LOAD_PAIR(x20, x21)
@@ -303,8 +335,9 @@ SYM(CoroutineSetContext):
   LOAD_PAIR(x24, x25)
   LOAD_PAIR(x26, x27)
   LOAD_PAIR(x28, x29)
-  ldr x30, [x0, #reg_x30]
-  
+  LOAD_REG(x30)
+
+  // Set the stack pointer from saved sp.
   ldr x2, [x0, #reg_sp]
   mov sp, x2
 
@@ -323,6 +356,9 @@ SYM(CoroutineSetContext):
   ldr x0, [x0, #reg_x0]
   br x1
 
+// Entry:
+// x0: address of 'from' context
+// x1: address of 'to' context
 SYM(CoroutineSwapContext):  
   STORE_PAIR(x18, x19)
   STORE_PAIR(x20, x21)
@@ -346,6 +382,7 @@ SYM(CoroutineSwapContext):
   mrs x2, fpcr
   str w2, [x0, #reg_fpcr]
 
+  // Now swap to the 'to' context, whose address is in x1.
   mov x0, x1
   b SYM(CoroutineSetContext)
 
@@ -355,6 +392,6 @@ SYM(CoroutineSwapContext):
 #undef LOAD_PAIR
 #undef SYM
 #else
-#error "Unsupported architecture"
+#error "Unsupported architecture for custom context"
 #endif
 

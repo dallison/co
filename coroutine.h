@@ -9,7 +9,7 @@
 //   language to switch stacks for the first call.
 // 2. user contexts which is a System V facility that is
 //     available on Linux and other operating systems.
-// 3. A custom context switcher written in assmebly language for
+// 3. A custom context switcher written in assembly language for
 //    x86_64 and aarch64.
 //
 //
@@ -18,6 +18,10 @@
 // but might cause issues if the system library intercepts longjmp.
 // The user contexts are disabled on MacOS and also cause issues with
 // ASAN.
+//
+// I think the custom context switcher is the best choice for portability
+// and performance.  However, since it's custom, it might cause issues
+// if tools are coded to understand the ucontext stuff in libc.
 #define CO_CTX_SETJMP 1
 #define CO_CTX_UCONTEXT 2
 #define CO_CTX_CUSTOM 3
@@ -41,7 +45,6 @@
 #define CO_POLL_EPOLL 1
 #define CO_POLL_POLL 2
 
-#include "context.h"
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -51,13 +54,19 @@
 // longjmp interception in TSAN, so if you want to make
 // use of TSAN in something that uses coroutines, you have to
 // use user contexts.
+//
+// Another alternative is to use the custom context switcher that is
+// provided in context.h.  This is the fastest and most portable but
+// is only available for x86_64 and aarch64 (at the moment).
+//
+// Modify the CO_CTX_MODE macro value to change the context switcher.
 #if defined(__APPLE__)
-#define CO_CTX_MODE CO_CTX_SETJMP
+#define CO_CTX_MODE CO_CTX_CUSTOM
 #define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
 #elif defined(__linux__)
 // Linux supports user contexts.  Let's use them so that tsan works.
-#define CO_CTX_MODE CO_CTX_UCONTEXT
+#define CO_CTX_MODE CO_CTX_CUSTOM
 #include <sys/epoll.h>
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
@@ -81,6 +90,7 @@ using Context = jmp_buf;
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
 using Context = ucontext_t;
 #else
+#include "context.h"
 using Context = co::CoroutineContext;
 #endif
 
