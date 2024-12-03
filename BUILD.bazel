@@ -32,7 +32,7 @@ cc_library(
         "//:macos_x86_64": [],
         "//:macos_arm64": [],
         "//:macos_default": [],
-        "//conditions:default": ["@com_google_absl//absl/container:flat_hash_map"],
+        "//conditions:default": ["@abseil-cpp//absl/container:flat_hash_map"],
     }),
 )
 
@@ -59,6 +59,6 @@ cc_test(
     ],
     deps = [
         ":co",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest_main",
     ],
 )
