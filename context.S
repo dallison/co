@@ -9,7 +9,7 @@
 .section        __TEXT,__text,regular,pure_instructions
 
 #elif defined(__linux__)
-.section ".text", "x"
+.text
 #define SYM(name) #name
 #define SYM_DATA(name) .type SYM(name), @function
 #else
@@ -85,7 +85,7 @@ SYM(CoroutineMakeContext):
   add 8(%rdi), %rsi   // End of Stack
   sub $8, %rsi        // Space for next context pointer
 
-  add $-16, %rsi      // Align to 16
+  and $-16, %rsi      // Align to 16
   sub $8, %rsi
   mov %rsi, reg_rsp(%rdi)   // Stack pointer in context
 
@@ -116,7 +116,6 @@ SYM(CoroutineGetContext):
   STORE_REG(rbp)
   STORE_REG(rsi)
   STORE_REG(rdi)
-  STORE_REG(rbx)
   
   // Return address is on stack, get it and store in %rip
   mov (%rsp), %rax
@@ -129,13 +128,15 @@ SYM(CoroutineGetContext):
   // Floating point stuff.
   lea reg_fp(%rdi), %rax
   fnstenv (%rax)
+  fldenv (%rax)   // Why do I need this instruction?  It doesn't work without it.
   stmxcsr reg_mxcsr(%rdi)
   ret
 
 // Entry:
 // rdi: address of context
 SYM(CoroutineSetContext):
-  // Load floating point save data.
+  // Load floating point save data.  fnstenv (%rax)
+
   lea reg_fp(%rdi), %rax
   fldenv (%rax)
   ldmxcsr reg_mxcsr(%rdi)
@@ -149,6 +150,7 @@ SYM(CoroutineSetContext):
   LOAD_REG(r12)
   LOAD_REG(r13)
   LOAD_REG(r14)
+  LOAD_REG(r15)
   LOAD_REG(rsp)
   LOAD_REG(rbp)
   LOAD_REG(rsi)
@@ -215,6 +217,7 @@ SYM(CoroutineSwapContext):
   LOAD_REG(r12)
   LOAD_REG(r13)
   LOAD_REG(r14)
+  LOAD_REG(r15)
   LOAD_REG(rsp)
   LOAD_REG(rbp)
   LOAD_REG(rsi)

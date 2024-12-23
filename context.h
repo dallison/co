@@ -18,7 +18,7 @@ struct alignas(16) CoroutineContext {
 
 // See context.S for the layout of the register save area.
 #if defined(__x86_64__)
-  char regs[640];
+  char regs[664];
 #elif defined(__aarch64__)
   char regs[320];
 #else
