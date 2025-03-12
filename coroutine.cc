@@ -933,9 +933,6 @@ CoroutineFd CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state,
 
 void CoroutineScheduler::Run() {
   running_ = true;
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  std::vector<struct epoll_event> events;
-#endif
 
   while (running_) {
     if (coroutines_.empty()) {
@@ -953,8 +950,8 @@ void CoroutineScheduler::Run() {
 
 // We get here any time a coroutine yields or waits.
 #if CO_POLL_MODE == CO_POLL_EPOLL
-    events.resize(num_epoll_events_);
-    int num_ready = epoll_wait(epoll_fd_, events.data(), events.size(), -1);
+    events_.resize(num_epoll_events_);
+    int num_ready = epoll_wait(epoll_fd_, events_.data(), events_.size(), -1);
     if (num_ready <= 0) {
       continue;
     }
@@ -962,7 +959,7 @@ void CoroutineScheduler::Run() {
     tick_count_++;
 
     // Choose a runnable coroutine.
-    CoroutineFd *c = GetRunnableCoroutine(events, num_ready);
+    CoroutineFd *c = GetRunnableCoroutine(events_, num_ready);
     if (c != nullptr && c->co != nullptr) {
       c->co->Resume(c->fd);
     }

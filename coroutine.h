@@ -456,6 +456,7 @@ private:
 #endif
   bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
+  std::vector<struct epoll_event> events_;
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
