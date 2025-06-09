@@ -622,7 +622,7 @@ extern "C" {
 void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
-DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_ADDRESS_SANITIZER
 void Coroutine::Resume(int value) const {
   switch (state_) {
   case State::kCoReady:

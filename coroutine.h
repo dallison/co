@@ -151,7 +151,7 @@ struct WaitFd {
 //
 // Due to stack switching, AddressSanitizer will report false-positive
 // errors (use-after-return). The principal function of a coroutine is likely
-// to need to be prefixed with DISABLE_ADDRESS_SANITIZER (detect_sanitizers.h)
+// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER (detect_sanitizers.h)
 // to disable diagnostics related to its stack frame.
 class Coroutine {
 public:
