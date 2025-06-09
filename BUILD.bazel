@@ -24,6 +24,7 @@ cc_library(
     hdrs = [
         "bitset.h",
         "coroutine.h",
+        "detect_sanitizers.h",
     ],
     copts = [
         "-Wall",
