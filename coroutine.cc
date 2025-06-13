@@ -3,6 +3,7 @@
 // See LICENSE file for licensing information.
 
 #include "coroutine.h"
+#include "detect_sanitizers.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -621,6 +622,7 @@ extern "C" {
 void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
+CO_DISABLE_ADDRESS_SANITIZER
 void Coroutine::Resume(int value) const {
   switch (state_) {
   case State::kCoReady:
@@ -806,7 +808,10 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   }
   struct epoll_event event = {.events = events, .data = {.ptr = nullptr}};
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
-  assert(e == 0);
+  if (e == -1) {
+    std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+    abort();
+  }
   num_epoll_events_++;
 }
 

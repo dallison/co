@@ -69,6 +69,7 @@
 #include "absl/container/flat_hash_map.h"
 #endif
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -78,6 +79,7 @@
 #include <vector>
 
 #include "bitset.h"
+#include "detect_sanitizers.h"
 
 namespace co {
 
@@ -146,6 +148,11 @@ struct WaitFd {
 // By default, the coroutine will be given a unique name and will
 // be started automatically.  It can have some user data which is
 // not owned by the coroutine.
+//
+// Due to stack switching, AddressSanitizer will report false-positive
+// errors (use-after-return). The principal function of a coroutine is likely
+// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER (detect_sanitizers.h)
+// to disable diagnostics related to its stack frame.
 class Coroutine {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
@@ -390,6 +397,8 @@ public:
   void Run();
 
   // Stop the scheduler.  Running coroutines will not be terminated.
+  // This function is thread-safe since a common pattern is to "Run()"
+  // the coroutines in a background thread.
   void Stop();
 
   void AddCoroutine(Coroutine *c);
@@ -454,7 +463,7 @@ private:
 #else
   ucontext_t yield_;
 #endif
-  bool running_ = false;
+  std::atomic<bool> running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> events_;
   int epoll_fd_ = -1;
