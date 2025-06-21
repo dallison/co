@@ -2,6 +2,9 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+// This is only supported on x86_64 and aarch64.
+#if defined(__x86_64__) || defined(__aarch64__)
+
 // Apple puts an underscore prefix for all external symbols.
 #if defined(__APPLE__)
 #define SYM(name) _##name
@@ -394,7 +397,7 @@ SYM(CoroutineSwapContext):
 #undef LOAD_REG
 #undef LOAD_PAIR
 #undef SYM
-#else
-#error "Unsupported architecture for custom context"
+#endif
+
 #endif
 

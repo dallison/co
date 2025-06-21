@@ -8,6 +8,8 @@
 
 namespace co {
 
+// This is only supported on x86_64 and aarch64.
+#if defined(__x86_64__) || defined(__aarch64__)
 // Custom coroutine context.  Contains the stack and register save area/
 // Needs 16-byte alignment for aarch64.
 struct alignas(16) CoroutineContext {
@@ -21,8 +23,6 @@ struct alignas(16) CoroutineContext {
   char regs[664];
 #elif defined(__aarch64__)
   char regs[320];
-#else
-#error "Unsupported architecture"
 #endif
 };
 
@@ -34,4 +34,6 @@ void CoroutineSwapContext(CoroutineContext *from, CoroutineContext *to);
 void CoroutineGetContext(CoroutineContext *ctx);
 void CoroutineSetContext(CoroutineContext *ctx);
 }
+#endif
+
 } // namespace co

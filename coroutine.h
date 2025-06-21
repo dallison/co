@@ -61,23 +61,62 @@
 //
 // Modify the CO_CTX_MODE macro value to change the context switcher.
 #if defined(__APPLE__)
+#if defined(__x86_64__) || defined(__aarch64__)
+// On Apple, we can use the custom context switcher for x86_64 and aarch64.
 #define CO_CTX_MODE CO_CTX_CUSTOM
+#else
+// Is there another Apple architecture?  Maybe, but the custome contxt switcher
+// is not available for it.  Use the setjmp/longjmp context switcher.
+#define CO_CTX_MODE CO_CTX_SETJMP
+#endif
 #define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
+
 #elif defined(__linux__)
-// Linux supports user contexts.  Let's use them so that tsan works.
+
+// On Linux, let's use custom context if it's available for the architecture.
+#if defined(__x86_64__) || defined(__aarch64__)
 #define CO_CTX_MODE CO_CTX_CUSTOM
+#else
+// Custom context switcher is not available for this architecture.  Use the
+// linux user context switcher.
+#define CO_CTX_MODE CO_CTX_UCONTEXT
+#endif
+
 #include <sys/epoll.h>
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
 #else
+// Other OS, use the custom context switcher if available
+// or setjmp/longjmp if not.  The custom context switcher is only available
+#if defined(__x86_64__) || defined(__aarch64__)
+#define CO_CTX_MODE CO_CTX_CUSTOM
+#else
 // Portable version is setjmp/longjmp
 #define CO_CTX_MODE CO_CTX_SETJMP
+#endif
+
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
 #endif
 
 #include <poll.h>
+
+// Uncomment this if you want to see which context switcher is being used.
+// This is useful for debugging and understanding which context switcher
+// is being used in your code.  It will print a message at compile time
+// indicating which context switcher is being used.
+#if 0
+#if CO_CTX_MODE == CO_CTX_CUSTOM
+#pragma message ("Using custom context switcher for coroutines.")
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+#pragma message ("Using ucontext for coroutines.")
+#elif CO_CTX_MODE == CO_CTX_SETJMP
+#pragma message ("Using setjmp/longjmp for coroutines.")
+#else
+#error "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
+#endif
+#endif
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 #include "absl/container/flat_hash_map.h"
