@@ -2,21 +2,29 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#ifndef coroutine_h
-#define coroutine_h
+#pragma once
 
-// We have two modes of context switches available.  The most
-// portable is using setjmp/longjmp with a little assembly
-// language to switch stacks for the first call.  There is
-// also user contexts which is a System V facility that is
-// available on Linux and other operating systems.
+// We have three modes of context switches available.
+// 1. using setjmp/longjmp with a little assembly
+//   language to switch stacks for the first call.
+// 2. user contexts which is a System V facility that is
+//     available on Linux and other operating systems.
+// 3. A custom context switcher written in assembly language for
+//    x86_64 and aarch64.
 //
-// TODO: maybe I need to write my own context switching functions
-// if the OS providers are going to remove features.  They seem
-// to be forcing everything into threads, which is the antithesis
-// of coroutines.
+//
+// Which one to use?  The custom context switcher is the fastest but may
+// not work on your architecture.  The setjmp/longjmp is the most portable
+// but might cause issues if the system library intercepts longjmp.
+// The user contexts are disabled on MacOS and also cause issues with
+// ASAN.
+//
+// I think the custom context switcher is the best choice for portability
+// and performance.  However, since it's custom, it might cause issues
+// if tools are coded to understand the ucontext stuff in libc.
 #define CO_CTX_SETJMP 1
 #define CO_CTX_UCONTEXT 2
+#define CO_CTX_CUSTOM 3
 
 // Do we use ::poll or ::epoll?  The epoll system call is Linux only and
 // can improve performance.
@@ -46,27 +54,83 @@
 // longjmp interception in TSAN, so if you want to make
 // use of TSAN in something that uses coroutines, you have to
 // use user contexts.
+//
+// Another alternative is to use the custom context switcher that is
+// provided in context.h.  This is the fastest and most portable but
+// is only available for x86_64 and aarch64 (at the moment).
+//
+// Modify the CO_CTX_MODE macro value to change the context switcher.
 #if defined(__APPLE__)
+#if defined(__x86_64__) || defined(__aarch64__)
+// On Apple, we can use the custom context switcher for x86_64 and aarch64.
+#define CO_CTX_MODE CO_CTX_CUSTOM
+#else
+// Is there another Apple architecture?  Maybe, but the custome contxt switcher
+// is not available for it.  Use the setjmp/longjmp context switcher.
 #define CO_CTX_MODE CO_CTX_SETJMP
+#endif
 #define CO_POLL_MODE CO_POLL_POLL
 #include <csetjmp>
+
 #elif defined(__linux__)
-// Linux supports user contexts.  Let's use them so that tsan works.
+
+// On Linux, let's use custom context if it's available for the architecture.
+#if defined(__x86_64__) || defined(__aarch64__)
+#define CO_CTX_MODE CO_CTX_CUSTOM
+#else
+// Custom context switcher is not available for this architecture.  Use the
+// linux user context switcher.
 #define CO_CTX_MODE CO_CTX_UCONTEXT
+#endif
+
 #include <sys/epoll.h>
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
 #else
+// Other OS, use the custom context switcher if available
+// or setjmp/longjmp if not.  The custom context switcher is only available
+#if defined(__x86_64__) || defined(__aarch64__)
+#define CO_CTX_MODE CO_CTX_CUSTOM
+#else
 // Portable version is setjmp/longjmp
 #define CO_CTX_MODE CO_CTX_SETJMP
+#endif
+
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
 #endif
 
 #include <poll.h>
 
+// Uncomment this if you want to see which context switcher is being used.
+// This is useful for debugging and understanding which context switcher
+// is being used in your code.  It will print a message at compile time
+// indicating which context switcher is being used.
+#if 0
+#if CO_CTX_MODE == CO_CTX_CUSTOM
+#pragma message ("Using custom context switcher for coroutines.")
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+#pragma message ("Using ucontext for coroutines.")
+#elif CO_CTX_MODE == CO_CTX_SETJMP
+#pragma message ("Using setjmp/longjmp for coroutines.")
+#else
+#error "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
+#endif
+#endif
+
 #if CO_POLL_MODE == CO_POLL_EPOLL
 #include "absl/container/flat_hash_map.h"
+#endif
+#include "absl/container/flat_hash_set.h"
+
+// Define the alias 'Context' for the context structure.
+#if CO_CTX_MODE == CO_CTX_SETJMP
+using Context = jmp_buf;
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+using Context = ucontext_t;
+#else
+#include "context.h"
+using Context = co::CoroutineContext;
 #endif
 
 #include <atomic>
@@ -75,6 +139,7 @@
 #include <ctime>
 #include <functional>
 #include <list>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -118,7 +183,8 @@ template <typename T> class Generator;
 
 struct CoroutineFd {
   CoroutineFd() = default;
-  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0) : co(c), fd(f), events(e) {}
+  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0)
+      : co(c), fd(f), events(e) {}
   const Coroutine *co = nullptr;
   int fd = -1;
   uint32_t events = 0;
@@ -194,6 +260,7 @@ public:
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
+
   ~Coroutine();
 
   // Start a coroutine running if it is not already running,
@@ -272,7 +339,7 @@ public:
   // this will be the same as that printed by Show().
   std::string ToString() const;
 
-  void GetAllFds(std::vector<int>& fds) const;
+  void GetAllFds(std::vector<int> &fds) const;
 
 private:
   enum class State {
@@ -308,20 +375,15 @@ private:
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                   // Coroutine ID.
+  uint32_t id_;                    // Coroutine ID.
   CoroutineFunctionRef function_; // Coroutine body.
-  std::string name_;              // Optional name.
+  std::string name_;               // Optional name.
   int interrupt_fd_;
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  mutable jmp_buf resume_; // Program environemnt for resuming.
-  mutable jmp_buf exit_;   // Program environemt to exit.
-#else
-  mutable ucontext_t resume_;
-  mutable ucontext_t exit_;
-#endif
+  mutable Context resume_;
+  mutable Context exit_;
   mutable int wait_result_;
   mutable bool first_resume_ = true;
 
@@ -410,7 +472,6 @@ public:
   // functions allow you to incorporate the multiplexed
   // IO into your own poll loop.
   void GetPollState(PollState *poll_state);
-  void ProcessPoll(PollState *poll_state);
 #endif
 
   // Print the state of all the coroutines to stderr.
@@ -433,37 +494,23 @@ private:
   template <typename T> friend class Generator;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  CoroutineFd *ChooseRunnable(const std::vector<struct epoll_event> &events,
-                              int num_ready);
-  CoroutineFd *
-  GetRunnableCoroutine(const std::vector<struct epoll_event> &events,
-                       int num_ready);
   void AddEpollFd(int fd, uint32_t events);
   void AddEpollFd(CoroutineFd *cfd, uint32_t events);
   void RemoveEpollFd(CoroutineFd *cfd);
 #else
   void BuildPollFds(PollState *poll_state);
-  CoroutineFd ChooseRunnable(PollState *poll_state, int num_ready);
-  CoroutineFd GetRunnableCoroutine(PollState *poll_state, int num_ready);
 #endif
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  jmp_buf &YieldBuf() { return yield_; }
-#else
-  ucontext_t *YieldCtx() { return &yield_; }
-#endif
+  Context& YieldCtx() { return yield_; }
+  void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  jmp_buf yield_;
-#else
-  ucontext_t yield_;
-#endif
-  std::atomic<bool> running_ = false;
+  Context yield_;
+  bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> events_;
   int epoll_fd_ = -1;
@@ -476,6 +523,7 @@ private:
 #endif
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
+  absl::flat_hash_set<const Coroutine *> deletions_;
 };
 
 template <typename T>
@@ -499,4 +547,3 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
 }
 
 } // namespace co
-#endif /* coroutine_h */

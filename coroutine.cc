@@ -30,6 +30,22 @@
 
 constexpr bool kCoDebug = false;
 
+#if CO_CTX_MODE == CO_CTX_SETJMP
+#define SETCONTEXT(ctx) __real_longjmp(ctx, 1)
+#define GETCONTEXT(ctx) setjmp(ctx)
+#define SWAPCONTEXT(from, to)   if (setjmp(from) == 0) { \
+    __real_longjmp(to, 1); \
+  }
+#elif CO_CTX_MODE == CO_CTX_UCONTEXT
+#define SETCONTEXT(ctx) setcontext(&ctx)
+#define GETCONTEXT(ctx) getcontext(&ctx)
+#define SWAPCONTEXT(from, to) swapcontext(&from, &to)
+#else
+#define SETCONTEXT(ctx) CoroutineSetContext(&ctx)
+#define GETCONTEXT(ctx) CoroutineGetContext(&ctx)
+#define SWAPCONTEXT(from, to) CoroutineSwapContext(&from, &to)
+#endif
+
 namespace co {
 static int NewEventFd() {
   int event_fd;
@@ -146,6 +162,13 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
   resume_.uc_link = &exit_;
   void (*func)(void) = reinterpret_cast<void (*)(void)>(__co_Invoke);
   makecontext(&resume_, func, 1, this);
+#elif CO_CTX_MODE == CO_CTX_CUSTOM
+  CoroutineGetContext(&resume_);
+  resume_.stack = stack_.data();
+  resume_.stack_size = stack_.size();
+  resume_.next = &exit_;
+  void (*func)(void *) = reinterpret_cast<void (*)(void *)>(__co_Invoke);
+  CoroutineMakeContext(&resume_, func, this);
 #endif
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -258,11 +281,7 @@ void Coroutine::SetState(State state) const {
 }
 
 void Coroutine::Exit() {
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  __real_longjmp(exit_, 1);
-#else
-  setcontext(&exit_);
-#endif
+  SETCONTEXT(exit_);
 }
 
 void Coroutine::Start() {
@@ -348,13 +367,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -382,14 +395,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
-
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -406,14 +412,8 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -428,14 +428,8 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoWaiting);
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -453,13 +447,8 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
@@ -544,14 +533,8 @@ void Coroutine::CallNonTemplate(Coroutine &callee) const {
   }
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
 
   // When we get here, the callee has done its work.  Remove this coroutine's
   // state from it.
@@ -563,14 +546,7 @@ void Coroutine::Yield() const {
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoYielded);
   TriggerEvent();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
   // We get here when resumed.  We ignore the result of setjmp as we
   // are not waiting for anything and there is no yield with timeout
@@ -580,14 +556,7 @@ void Coroutine::Yield() const {
 
 void Coroutine::YieldToScheduler() const {
   SetState(State::kCoYielded);
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 }
 
 void Coroutine::YieldNonTemplate() const {
@@ -600,14 +569,8 @@ void Coroutine::YieldNonTemplate() const {
   // This will be done when another call is made.
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
-#if CO_CTX_MODE == CO_CTX_SETJMP
-  if (setjmp(resume_) == 0) {
-    __real_longjmp(scheduler_.YieldBuf(), 1);
-    // Never get here.
-  }
-#else
-  swapcontext(&resume_, scheduler_.YieldCtx());
-#endif
+  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
+
   // We get here when resumed from another call.
 }
 
@@ -636,7 +599,8 @@ void Coroutine::Resume(int value) const {
     yielded_address_ = nullptr;
 #if CO_CTX_MODE == CO_CTX_SETJMP
     if (setjmp(exit_) == 0) {
-      const void *sp = reinterpret_cast<const char *>(stack_.data()) + stack_.size();
+      const void *sp =
+          reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
 
 // clang-format off
@@ -682,14 +646,14 @@ void Coroutine::Resume(int value) const {
       // clang-format on
     }
 #else
-    getcontext(&exit_);
+    GETCONTEXT(exit_);
     // We will get here when the coroutines's function returns.
     if (first_resume_) {
       first_resume_ = false;
       // This is the first time we have been resumed so set the context
       // to that set up by makecontext.  This will set the stack and invoke
       // the function.
-      setcontext(&resume_);
+      SETCONTEXT(resume_);
     }
 #endif
 
@@ -700,17 +664,14 @@ void Coroutine::Resume(int value) const {
     // Functor returned, we are dead.
     SetState(State::kCoDead);
     scheduler_.RemoveCoroutine(this);
+    SETCONTEXT(scheduler_.YieldCtx());
     break;
   case State::kCoYielded:
     [[fallthrough]];
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    __real_longjmp(resume_, 1);
-#else
-    setcontext(&resume_);
-#endif
+    SETCONTEXT(resume_);
     break;
   case State::kCoRunning:
     [[fallthrough]];
@@ -718,16 +679,12 @@ void Coroutine::Resume(int value) const {
     // Should never get here.
     break;
   case State::kCoDead:
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    __real_longjmp(exit_, 1);
-#else
-    setcontext(&exit_);
-#endif
+    SETCONTEXT(exit_);
     break;
   }
 }
 
-void Coroutine::GetAllFds(std::vector<int>& fds) const {
+void Coroutine::GetAllFds(std::vector<int> &fds) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   if (yield_fd_.fd != -1) {
     fds.push_back(yield_fd_.fd);
@@ -769,35 +726,6 @@ CoroutineScheduler::~CoroutineScheduler() {
 }
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-CoroutineFd *CoroutineScheduler::ChooseRunnable(
-    const std::vector<struct epoll_event> &events, int num_ready) {
-  CoroutineFd *chosen = nullptr;
-  uint64_t max_wait = 0UL;
-  for (size_t i = 0; i < size_t(num_ready); i++) {
-    const struct epoll_event &event = events[i];
-    if (event.data.ptr == nullptr) {
-      ClearEvent(interrupt_fd_);
-      return nullptr;
-    }
-    CoroutineFd *cc = reinterpret_cast<CoroutineFd *>(event.data.ptr);
-    uint64_t wait_time = tick_count_ - cc->co->LastTick();
-    if (wait_time > max_wait) {
-      chosen = cc;
-      max_wait = wait_time;
-    }
-  }
-  return chosen;
-}
-
-CoroutineFd *CoroutineScheduler::GetRunnableCoroutine(
-    const std::vector<struct epoll_event> &events, int num_ready) {
-  CoroutineFd *chosen = ChooseRunnable(events, num_ready);
-
-  if (chosen != nullptr && chosen->co != nullptr) {
-    chosen->co->ClearEvent();
-  }
-  return chosen;
-}
 
 void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   if (fd == -1) {
@@ -885,134 +813,143 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
     }
   }
 }
-
-// Schedule the next coroutine to run.  This scheduler chooses the
-// coroutine that has been waiting longest.  Unless they are just new
-// no two coroutines can have been waiting for the same amount of time.
-// This is a completely fair scheduler with all coroutines given the
-// same priority.
-CoroutineFd CoroutineScheduler::ChooseRunnable(PollState *poll_state,
-                                               int num_ready) {
-  // Find the ready coroutine with the highest time waiting.
-  // We need to process all ready coroutines once to choose the
-  // one to run.
-  // Worst case is that all coroutines are ready, which means we
-  // need O(n) complexity.  We can't avoid processing all the ready
-  // coroutines so we only do it once rather than inserting them into
-  // a data structure and processing it afterwards.
-  Coroutine *chosen = nullptr;
-  int chosen_fd;
-  uint64_t max_wait = 0UL;
-  for (size_t i = 1; i < poll_state->pollfds.size(); i++) {
-    struct pollfd *fd = &poll_state->pollfds[i];
-    Coroutine *co = poll_state->coroutines[i - 1];
-    uint64_t wait_time = tick_count_ - co->LastTick();
-    if (fd->revents != 0 && (chosen == nullptr || wait_time > max_wait)) {
-      chosen = co;
-      chosen_fd = fd->fd;
-      max_wait = wait_time;
-    }
-  }
-  if (chosen == nullptr) {
-    return CoroutineFd();
-  }
-  return CoroutineFd(chosen, chosen_fd, 0);
-}
-
-CoroutineFd CoroutineScheduler::GetRunnableCoroutine(PollState *poll_state,
-                                                     int num_ready) {
-  if (interrupt_fd_.revents != 0) {
-    // Interrupted.
-    ClearEvent(interrupt_fd_.fd);
-    return CoroutineFd();
-  }
-
-  CoroutineFd chosen = ChooseRunnable(poll_state, num_ready);
-
-  if (chosen.co != nullptr) {
-    chosen.co->ClearEvent();
-  }
-  return chosen;
-}
 #endif
 
 void CoroutineScheduler::Run() {
   running_ = true;
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  std::vector<struct epoll_event> epoll_events;
+#endif
 
+  // To support both epoll and poll modes we copy the results
+  // into a vector of CoroutineFd objects.  There are likely to
+  // be a small number of events triggering at once, so this is
+  // not a big overhead.
+  std::vector<CoroutineFd> events;
   while (running_) {
     if (coroutines_.empty()) {
       // No coroutines, nothing to do.
       break;
     }
-#if CO_CTX_MODE == CO_CTX_SETJMP
-    setjmp(yield_);
-#else
-    getcontext(&yield_);
-#endif
+
     if (!running_) {
       break;
     }
 
-// We get here any time a coroutine yields or waits.
 #if CO_POLL_MODE == CO_POLL_EPOLL
-    events_.resize(num_epoll_events_);
-    int num_ready = epoll_wait(epoll_fd_, events_.data(), events_.size(), -1);
+    epoll_events.resize(num_epoll_events_);
+    int num_ready =
+        epoll_wait(epoll_fd_, epoll_events.data(), epoll_events.size(), -1);
     if (num_ready <= 0) {
       continue;
     }
-    // One more tick.
-    tick_count_++;
+    if (!running_) {
+      break;
+    }
+    // Copy the epoll_events into the events vector,
+    // converting the epoll_event to a CoroutineFd.
 
-    // Choose a runnable coroutine.
-    CoroutineFd *c = GetRunnableCoroutine(events_, num_ready);
-    if (c != nullptr && c->co != nullptr) {
-      c->co->Resume(c->fd);
+    events.clear();
+    events.reserve(num_ready);
+    for (int i = 0; i < num_ready; i++) {
+      struct epoll_event &event = epoll_events[i];
+      CoroutineFd *cc = reinterpret_cast<CoroutineFd *>(event.data.ptr);
+      events.push_back(*cc);
     }
 #else
+    // Poll mode.
     BuildPollFds(&poll_state_);
-
-    // Wait for coroutines (or the interrupt fd) to trigger.
     int num_ready =
         ::poll(poll_state_.pollfds.data(), poll_state_.pollfds.size(), -1);
     if (num_ready <= 0) {
       continue;
     }
-
-    // Copy interrupt fd from poll fd set.
-    interrupt_fd_ = poll_state_.pollfds[0];
-
-    // One more tick.
-    tick_count_++;
-
-    // Choose a runnable coroutine.
-    CoroutineFd c = GetRunnableCoroutine(&poll_state_, num_ready);
-    if (c.co != nullptr) {
-      c.co->Resume(c.fd);
+    if (!running_) {
+      break;
+    }
+    // Copy all triggered pollfds into the events vector.
+    events.clear();
+    events.reserve(num_ready);
+    for (size_t i = 0; i < poll_state_.pollfds.size(); i++) {
+      if (poll_state_.pollfds[i].revents != 0) {
+        if (i == 0) {
+          // Interrupt fd.
+          CoroutineFd c = {nullptr, poll_state_.pollfds[i].fd, 0};
+          events.push_back(c);
+          continue;
+        }
+        CoroutineFd c = {poll_state_.coroutines[i - 1],
+                         poll_state_.pollfds[i].fd, 0};
+        events.push_back(c);
+      }
     }
 #endif
+
+    // Sort the events by the time they have been waiting.
+    std::sort(events.begin(), events.end(),
+              [](const CoroutineFd &a, const CoroutineFd &b) {
+                if (a.co == nullptr || b.co == nullptr) {
+                  return false;
+                }
+                return a.co->LastTick() < b.co->LastTick();
+              });
+
+    // Keep this out of a register.
+    volatile int index = 0;
+
+    // We need to keep track of which coroutines have been triggered.
+    BitSet triggered(coroutine_ids_.SizeInBits());
+
+    // Build the context/jmp_buf for the yield.  This is where coroutines
+    // will yield to.
+    GETCONTEXT(yield_);
+
+    // This loop resumes all ready coroutines once each.  It allows
+    // the scheduler to scale linearly with the number of ready
+    // coroutines.
+    for (;;) {
+      // We get here on a coroutine yield.  The "index" variable is
+      // our current position in the events vector.
+      if (!running_) {
+        break;
+      }
+      if (index >= num_ready) {
+        break;
+      }
+      CoroutineFd *cfd = &events[index];
+      index++;
+      if (cfd->co == nullptr) {
+// Interrupt fd.
+#if CO_POLL_MODE == CO_POLL_EPOLL
+        ClearEvent(interrupt_fd_);
+#else
+        ClearEvent(interrupt_fd_.fd);
+#endif
+        continue;
+      }
+
+      tick_count_++;
+
+      // Clear the event for the corouutine since we will be resuming
+      // it.
+      cfd->co->ClearEvent();
+
+      // Only trigger a coroutine once in this loop.
+      if (triggered.Contains(cfd->co->Id())) {
+        continue;
+      }
+      triggered.Set(cfd->co->Id());
+
+      cfd->co->Resume(cfd->fd);
+      // Never get here.
+    }
+    CommitDeletions();
   }
 }
 
 #if CO_POLL_MODE == CO_POLL_POLL
 void CoroutineScheduler::GetPollState(PollState *poll_state) {
   BuildPollFds(poll_state);
-}
-
-void CoroutineScheduler::ProcessPoll(PollState *poll_state) {
-  int num_ready = 0;
-  for (size_t i = 1; i < poll_state->pollfds.size(); i++) {
-    if (poll_state->pollfds[i].revents != 0) {
-      num_ready++;
-    }
-  }
-  // One more tick.
-  tick_count_++;
-
-  // Choose a runnable coroutine.
-  CoroutineFd c = GetRunnableCoroutine(poll_state, num_ready);
-  if (c.co != nullptr) {
-    c.co->Resume(c.fd);
-  }
 }
 #endif
 
@@ -1023,20 +960,25 @@ void CoroutineScheduler::AddCoroutine(Coroutine *c) {
 // Removes a coroutine but doesn't destruct it.  The coroutines's id will
 // be removed and can be reused immediately after the completion callback
 // is called.
-void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) {
-  coroutine_ids_.Free(c->Id());
-  last_freed_coroutine_id_ = c->Id();
+void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) { deletions_.insert(c); }
 
-  for (auto it = coroutines_.begin(); it != coroutines_.end(); it++) {
-    if (*it == c) {
-      coroutines_.erase(it);
-      // Call completion callback to allow for external memory management.
-      if (completion_callback_ != nullptr) {
-        completion_callback_(const_cast<Coroutine*>(c));
+void CoroutineScheduler::CommitDeletions() {
+  for (auto *c : deletions_) {
+    coroutine_ids_.Free(c->Id());
+    last_freed_coroutine_id_ = c->Id();
+
+    for (auto it = coroutines_.begin(); it != coroutines_.end(); it++) {
+      if (*it == c) {
+        coroutines_.erase(it);
+        // Call completion callback to allow for external memory management.
+        if (completion_callback_ != nullptr) {
+          completion_callback_(const_cast<Coroutine *>(c));
+        }
+        break;
       }
-      break;
     }
   }
+  deletions_.clear();
 }
 
 uint32_t CoroutineScheduler::AllocateId() {
@@ -1082,11 +1024,10 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
 #else
   fds.push_back(interrupt_fd_.fd);
 #endif
-  for (auto* co : coroutines_) {
+  for (auto *co : coroutines_) {
     co->GetAllFds(fds);
   }
   return fds;
 }
-
 
 } // namespace co

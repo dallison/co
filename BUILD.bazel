@@ -20,10 +20,12 @@ cc_library(
     name = "co",
     srcs = [
         "coroutine.cc",
+        "context.S",
     ],
     hdrs = [
         "bitset.h",
         "coroutine.h",
+        "context.h",
         "detect_sanitizers.h",
     ],
     copts = [
@@ -34,7 +36,9 @@ cc_library(
         "//:macos_arm64": [],
         "//:macos_default": [],
         "//conditions:default": ["@com_google_absl//absl/container:flat_hash_map"],
-    }),
+    }) + [
+        "@com_google_absl//absl/container:flat_hash_set"
+    ],
 )
 
 cc_binary(
@@ -57,6 +61,17 @@ cc_test(
     name = "test_coroutines",
     srcs = [
         "test_coroutines.cc",
+    ],
+    deps = [
+        ":co",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "coroutines_test",
+    srcs = [
+        "coroutines_test.cc",
     ],
     deps = [
         ":co",

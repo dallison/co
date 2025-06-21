@@ -15,7 +15,11 @@
 namespace co {
 
 class BitSet {
- public:
+public:
+  BitSet() = default;
+  BitSet(int num_bits) {
+    bits_.resize(num_bits / 65 + 1);
+  }
   // Allocate the first free bit.
   std::uint32_t Allocate();
 
@@ -31,7 +35,15 @@ class BitSet {
   // Is the given bit set?
   bool Contains(std::uint32_t bit) const;
 
- private:
+  void Clear() {
+    for (auto &b : bits_) {
+      b = 0;
+    }
+  }
+
+  int SizeInBits() const { return bits_.size() * 64; }
+
+private:
   // Note the use of explicit long long type here because
   // we use ffsll to look for the set bits and that is
   // explicit in its use of long long.
@@ -92,5 +104,5 @@ inline bool BitSet::Contains(std::uint32_t bit) const {
   std::uint32_t b = bit % 64;
   return (bits_[word] & (1LL << b)) != 0;
 }
-}  // namespace co
-#endif  // __BITSET_H
+} // namespace co
+#endif // __BITSET_H
