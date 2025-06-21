@@ -26,6 +26,7 @@ cc_library(
         "bitset.h",
         "coroutine.h",
         "context.h",
+        "detect_sanitizers.h",
     ],
     copts = [
         "-Wall",
