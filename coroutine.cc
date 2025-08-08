@@ -555,7 +555,6 @@ void Coroutine::Yield() const {
 }
 
 void Coroutine::YieldToScheduler() const {
-  SetState(State::kCoYielded);
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 }
 
