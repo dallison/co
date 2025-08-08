@@ -494,7 +494,7 @@ private:
   template <typename T> friend class Generator;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  void AddEpollFd(int fd, uint32_t events);
+  void AddEpollFd(int fd, uint32_t events, void* data);
   void AddEpollFd(CoroutineFd *cfd, uint32_t events);
   void RemoveEpollFd(CoroutineFd *cfd);
 #else
