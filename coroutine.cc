@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <fcntl.h>
 #include <iostream>
 
 #include "bitset.h"
@@ -33,8 +34,9 @@ constexpr bool kCoDebug = false;
 #if CO_CTX_MODE == CO_CTX_SETJMP
 #define SETCONTEXT(ctx) __real_longjmp(ctx, 1)
 #define GETCONTEXT(ctx) setjmp(ctx)
-#define SWAPCONTEXT(from, to)   if (setjmp(from) == 0) { \
-    __real_longjmp(to, 1); \
+#define SWAPCONTEXT(from, to)                                                  \
+  if (setjmp(from) == 0) {                                                     \
+    __real_longjmp(to, 1);                                                     \
   }
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
 #define SETCONTEXT(ctx) setcontext(&ctx)
@@ -129,20 +131,21 @@ asm(
 #endif
 // clang-format on
 
-Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunction functor,
+Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(machine,
+    : Coroutine(scheduler,
                 [functor = std::move(functor)](const Coroutine &c) {
                   functor(const_cast<Coroutine *>(&c));
                 },
                 std::move(name), interrupt_fd, autostart, stack_size,
                 user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
-                     std::string name, int interrupt_fd, bool autostart,
-                     size_t stack_size, void *user_data)
-    : scheduler_(machine), function_(std::move(functor)),
+Coroutine::Coroutine(CoroutineScheduler &scheduler,
+                     CoroutineFunctionRef functor, std::string name,
+                     int interrupt_fd, bool autostart, size_t stack_size,
+                     void *user_data)
+    : scheduler_(scheduler), function_(std::move(functor)),
       interrupt_fd_(interrupt_fd), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name.empty()) {
@@ -177,7 +180,7 @@ Coroutine::Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef functor,
     fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
     abort();
   }
-  yield_fd_ = CoroutineFd(this, efd, EPOLLIN);
+  yield_fd_ = YieldedCoroutine(this, efd, EPOLLIN);
 #else
   event_fd_.fd = NewEventFd();
   if (event_fd_.fd == -1) {
@@ -280,9 +283,7 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
-void Coroutine::Exit() {
-  SETCONTEXT(exit_);
-}
+void Coroutine::Exit() { SETCONTEXT(exit_); }
 
 void Coroutine::Start() {
   if (state_ == State::kCoNew) {
@@ -339,7 +340,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   if (timeout_ns > 0) {
     timer_fd = MakeTimer(timeout_ns);
 #if CO_POLL_MODE == CO_POLL_EPOLL
-    wait_fds_.push_back(CoroutineFd(this, timer_fd, EPOLLIN));
+    wait_fds_.push_back(YieldedCoroutine(this, timer_fd, EPOLLIN));
 #else
     struct pollfd timerfd = {.fd = timer_fd, .events = POLLIN};
     wait_fds_.push_back(timerfd);
@@ -350,9 +351,9 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
 
 int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
+  wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
   if (interrupt_fd_ != -1) {
-    wait_fds_.push_back(CoroutineFd(this, interrupt_fd_, EPOLLIN));
+    wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
 #else
   struct pollfd pfd = {.fd = fd, .events = short(event_mask)};
@@ -376,10 +377,10 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
                     uint64_t timeout_ns) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   for (auto &fd : fds) {
-    wait_fds_.push_back(CoroutineFd(this, fd, event_mask));
+    wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
   }
   if (interrupt_fd_ != -1) {
-    wait_fds_.push_back(CoroutineFd(this, interrupt_fd_, EPOLLIN));
+    wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
 #else
   for (auto &fd : fds) {
@@ -403,10 +404,10 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
 #if CO_POLL_MODE == CO_POLL_EPOLL
 int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   for (auto &fd : fds) {
-    wait_fds_.push_back(CoroutineFd(this, fd.fd, fd.events));
+    wait_fds_.push_back(YieldedCoroutine(this, fd.fd, fd.events));
   }
   if (interrupt_fd_ != -1) {
-    wait_fds_.push_back(CoroutineFd(this, interrupt_fd_, EPOLLIN));
+    wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
@@ -436,7 +437,6 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
 
 int Coroutine::Wait(const std::vector<struct pollfd> &fds,
                     uint64_t timeout_ns) const {
-  SetState(State::kCoWaiting);
   for (auto &fd : fds) {
     wait_fds_.push_back(fd);
   }
@@ -447,6 +447,7 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
+  SetState(State::kCoWaiting);
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
   // Get here when resumed.
@@ -534,7 +535,6 @@ void Coroutine::CallNonTemplate(Coroutine &callee) const {
   SetState(State::kCoYielded);
   last_tick_ = scheduler_.TickCount();
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
-
 
   // When we get here, the callee has done its work.  Remove this coroutine's
   // state from it.
@@ -708,7 +708,7 @@ CoroutineScheduler::CoroutineScheduler() {
     std::cerr << "Failed to create epoll fd: " << strerror(errno) << std::endl;
     abort();
   }
-  AddEpollFd(interrupt_fd_, EPOLLIN, reinterpret_cast<void*>(&interrupt_fd_));
+  AddEpollFd(interrupt_fd_, EPOLLIN);
 #else
   interrupt_fd_.fd = NewEventFd();
   interrupt_fd_.events = POLLIN;
@@ -726,14 +726,17 @@ CoroutineScheduler::~CoroutineScheduler() {
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 
-void CoroutineScheduler::AddEpollFd(int fd, uint32_t events, void* data) {
+void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   if (fd == -1) {
     return;
   }
   if (kCoDebug) {
     std::cerr << "adding raw epoll fd " << fd << std::endl;
   }
-  struct epoll_event event = {.events = events, .data = {.ptr = data}};
+  struct epoll_event event;
+  memset(&event, 0, sizeof(event));
+  event.events = events;
+  event.data.fd = fd;
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
   if (e == -1) {
     std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
@@ -742,43 +745,52 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events, void* data) {
   num_epoll_events_++;
 }
 
-void CoroutineScheduler::AddEpollFd(CoroutineFd *cfd, uint32_t events) {
-  if (cfd->fd == -1) {
+void CoroutineScheduler::AddEpollFd(YieldedCoroutine *c, uint32_t events) {
+  if (c->fd == -1) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << "adding coroutine epoll fd " << cfd->fd << std::endl;
+    std::cerr << "adding coroutine epoll fd " << c->fd << std::endl;
   }
-  struct epoll_event event = {.events = events, .data = {.ptr = cfd}};
-  int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, cfd->fd, &event);
-  if (e == -1) {
-    if (errno == EEXIST) {
-      auto it = coroutine_fds_.find(cfd->fd);
-      if (it != coroutine_fds_.end()) {
-        std::cerr << "File descriptor " << cfd->fd
-                  << " is already registered by coroutine " << cfd->co->Name()
-                  << std::endl;
-      } else {
-        std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
-      }
-    } else {
+  auto it = waiting_coroutines_.find(c->fd);
+  if (it == waiting_coroutines_.end()) {
+    absl::flat_hash_set<YieldedCoroutine *> s;
+    s.insert(c);
+    struct epoll_event event;
+    memset(&event, 0, sizeof(event));
+    event.events = events;
+    event.data.fd = c->fd;
+    int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, c->fd, &event);
+    if (e == -1) {
       std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      abort();
     }
-    abort();
+    num_epoll_events_++;
+    waiting_coroutines_.insert(std::make_pair(c->fd, std::move(s)));
+  } else {
+    it->second.insert(c);
   }
-  num_epoll_events_++;
-  coroutine_fds_.insert(std::make_pair(cfd->fd, cfd));
 }
 
-void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
-  if (cfd->fd == -1) {
+void CoroutineScheduler::RemoveEpollFd(YieldedCoroutine *c) {
+  if (c->fd == -1) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << "removing coroutine epoll fd " << cfd->fd << std::endl;
+    std::cerr << "removing coroutine epoll fd " << c->fd << std::endl;
+  }
+  auto it = waiting_coroutines_.find(c->fd);
+  if (it == waiting_coroutines_.end()) {
+    // Not found, nothing to do.
+    return;
+  }
+  auto &list = it->second;
+  list.erase(c);
+  if (!list.empty()) {
+    return;
   }
   struct epoll_event event = {.events = EPOLLIN, .data = {.ptr = nullptr}};
-  int e = epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, cfd->fd, &event);
+  int e = epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, c->fd, &event);
   if (e == -1) {
     if (errno == EBADF) {
       // Ignore removing a file descriptor that doesn't exist.
@@ -788,7 +800,7 @@ void CoroutineScheduler::RemoveEpollFd(CoroutineFd *cfd) {
     }
   }
   num_epoll_events_--;
-  coroutine_fds_.erase(cfd->fd);
+  waiting_coroutines_.erase(c->fd);
 }
 
 #else
@@ -821,10 +833,11 @@ void CoroutineScheduler::Run() {
 #endif
 
   // To support both epoll and poll modes we copy the results
-  // into a vector of CoroutineFd objects.  There are likely to
+  // into a vector of YieldedCoroutine objects.  There are likely to
   // be a small number of events triggering at once, so this is
   // not a big overhead.
-  std::vector<CoroutineFd> events;
+  std::vector<YieldedCoroutine> events;
+
   while (running_) {
     if (coroutines_.empty()) {
       // No coroutines, nothing to do.
@@ -834,6 +847,8 @@ void CoroutineScheduler::Run() {
     if (!running_) {
       break;
     }
+
+    int max_fd = -1;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
     epoll_events.resize(num_epoll_events_);
@@ -846,18 +861,24 @@ void CoroutineScheduler::Run() {
       break;
     }
     // Copy the epoll_events into the events vector,
-    // converting the epoll_event to a CoroutineFd.
+    // converting the epoll_event to a YieldedCoroutine.
 
     events.clear();
     events.reserve(num_ready);
     for (int i = 0; i < num_ready; i++) {
       struct epoll_event &event = epoll_events[i];
-      if (event.data.ptr == reinterpret_cast<void*>(&interrupt_fd_)) {
-        events.push_back(CoroutineFd(nullptr, interrupt_fd_));
-	continue;
+      if (event.data.fd > max_fd) {
+        max_fd = event.data.fd;
       }
-      CoroutineFd *cc = reinterpret_cast<CoroutineFd *>(event.data.ptr);
-      events.push_back(*cc);
+      auto it = waiting_coroutines_.find(event.data.fd);
+      if (it == waiting_coroutines_.end()) {
+
+        events.push_back({nullptr, event.data.fd, 0});
+        continue;
+      }
+      for (auto &list : it->second) {
+        events.push_back(*list);
+      }
     }
 #else
     // Poll mode.
@@ -874,15 +895,18 @@ void CoroutineScheduler::Run() {
     events.clear();
     events.reserve(num_ready);
     for (size_t i = 0; i < poll_state_.pollfds.size(); i++) {
+      if (poll_state_.pollfds[i].fd > max_fd) {
+        max_fd = poll_state_.pollfds[i].fd;
+      }
       if (poll_state_.pollfds[i].revents != 0) {
         if (i == 0) {
           // Interrupt fd.
-          CoroutineFd c = {nullptr, poll_state_.pollfds[i].fd, 0};
+          YieldedCoroutine c = {nullptr, poll_state_.pollfds[i].fd, 0};
           events.push_back(c);
           continue;
         }
-        CoroutineFd c = {poll_state_.coroutines[i - 1],
-                         poll_state_.pollfds[i].fd, 0};
+        YieldedCoroutine c = {poll_state_.coroutines[i - 1],
+                              poll_state_.pollfds[i].fd, 0};
         events.push_back(c);
       }
     }
@@ -890,7 +914,7 @@ void CoroutineScheduler::Run() {
 
     // Sort the events by the time they have been waiting.
     std::sort(events.begin(), events.end(),
-              [](const CoroutineFd &a, const CoroutineFd &b) {
+              [](const YieldedCoroutine &a, const YieldedCoroutine &b) {
                 if (a.co == nullptr || b.co == nullptr) {
                   return false;
                 }
@@ -902,6 +926,11 @@ void CoroutineScheduler::Run() {
 
     // We need to keep track of which coroutines have been triggered.
     BitSet triggered(coroutine_ids_.SizeInBits());
+
+    // To keep track of the file descriptors we have already processed.  This is
+    // so that we can check that a coroutine that is waiting for the same fd
+    // isn't resumed when the fd is no longer ready.
+    BitSet processed_fds(max_fd + 1);
 
     // Build the context/jmp_buf for the yield.  This is where coroutines
     // will yield to.
@@ -919,9 +948,9 @@ void CoroutineScheduler::Run() {
       if (index >= num_ready) {
         break;
       }
-      CoroutineFd *cfd = &events[index];
+      YieldedCoroutine *c = &events[index];
       index++;
-      if (cfd->co == nullptr) {
+      if (c->co == nullptr) {
 // Interrupt fd.
 #if CO_POLL_MODE == CO_POLL_EPOLL
         ClearEvent(interrupt_fd_);
@@ -933,17 +962,38 @@ void CoroutineScheduler::Run() {
 
       tick_count_++;
 
+      if (processed_fds.Contains(c->fd)) {
+        // Since we can have more than one coroutine waiting for an fd we need
+        // to check that the fd is still ready to prevent blocking.  We only do
+        // this if the fd is in blocking mode.
+        int e = fcntl(c->fd, F_GETFL, 0);
+        if (e != -1 && (e & O_NONBLOCK) == 0) {
+          struct pollfd pfd = {c->fd, int16_t(c->events), 0};
+          poll(&pfd, 1, 0);
+          if ((pfd.revents & (int16_t(c->events) | POLLHUP)) == 0) {
+            // Fd is not ready so we would block.  Don't resume the
+            // coroutine.
+            if (kCoDebug) {
+              std::cerr << "Coroutine " << c->co->Name() << " is blocked on fd "
+                        << c->fd << std::endl;
+            }
+            continue;
+          }
+        }
+      }
+      processed_fds.Set(c->fd);
+
       // Clear the event for the corouutine since we will be resuming
       // it.
-      cfd->co->ClearEvent();
+      c->co->ClearEvent();
 
       // Only trigger a coroutine once in this loop.
-      if (triggered.Contains(cfd->co->Id())) {
+      if (triggered.Contains(c->co->Id())) {
         continue;
       }
-      triggered.Set(cfd->co->Id());
+      triggered.Set(c->co->Id());
 
-      cfd->co->Resume(cfd->fd);
+      c->co->Resume(c->fd);
       // Never get here.
     }
     CommitDeletions();
@@ -963,7 +1013,9 @@ void CoroutineScheduler::AddCoroutine(Coroutine *c) {
 // Removes a coroutine but doesn't destruct it.  The coroutines's id will
 // be removed and can be reused immediately after the completion callback
 // is called.
-void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) { deletions_.insert(c); }
+void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) {
+  deletions_.insert(c);
+}
 
 void CoroutineScheduler::CommitDeletions() {
   for (auto *c : deletions_) {

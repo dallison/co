@@ -14,12 +14,17 @@
 
 namespace co {
 
+inline constexpr size_t BitsToWords(size_t bits) {
+  return bits == 0 ? 0 : (bits - 1) / 64 + 1;
+}
+
 class BitSet {
 public:
   BitSet() = default;
-  BitSet(int num_bits) {
-    bits_.resize(num_bits / 65 + 1);
-  }
+  BitSet(int num_bits) { Resize(num_bits); }
+
+  void Resize(int num_bits) { bits_.resize(BitsToWords(num_bits)); }
+
   // Allocate the first free bit.
   std::uint32_t Allocate();
 

@@ -108,13 +108,14 @@
 // indicating which context switcher is being used.
 #if 0
 #if CO_CTX_MODE == CO_CTX_CUSTOM
-#pragma message ("Using custom context switcher for coroutines.")
+#pragma message("Using custom context switcher for coroutines.")
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
-#pragma message ("Using ucontext for coroutines.")
+#pragma message("Using ucontext for coroutines.")
 #elif CO_CTX_MODE == CO_CTX_SETJMP
-#pragma message ("Using setjmp/longjmp for coroutines.")
+#pragma message("Using setjmp/longjmp for coroutines.")
 #else
-#error "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
+#error                                                                         \
+    "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
 #endif
 #endif
 
@@ -181,9 +182,9 @@ void __co_Invoke(class Coroutine *c);
 
 template <typename T> class Generator;
 
-struct CoroutineFd {
-  CoroutineFd() = default;
-  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0)
+struct YieldedCoroutine {
+  YieldedCoroutine() = default;
+  YieldedCoroutine(const Coroutine *c, int f, uint32_t e = 0)
       : co(c), fd(f), events(e) {}
   const Coroutine *co = nullptr;
   int fd = -1;
@@ -217,46 +218,46 @@ struct WaitFd {
 //
 // Due to stack switching, AddressSanitizer will report false-positive
 // errors (use-after-return). The principal function of a coroutine is likely
-// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER (detect_sanitizers.h)
-// to disable diagnostics related to its stack frame.
+// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER
+// (detect_sanitizers.h) to disable diagnostics related to its stack frame.
 class Coroutine {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
   // to duplicate it by calling dup(2) for each coroutine.  The coroutine
   // will add it to the poll set and that is racy if you use the same
   // fd in two coroutines.  In fact, when using epoll, it won't be allowed.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name, size_t stack_size)
-      : Coroutine(machine, function, name, -1, true,
+      : Coroutine(scheduler, function, name, -1, true,
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
 
   // Options based constructor.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             CoroutineOptions opts)
-      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name, size_t stack_size)
-      : Coroutine(machine, function, name, -1, true,
+      : Coroutine(scheduler, function, name, -1, true,
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
 
   // Options based constructor.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             CoroutineOptions opts)
-      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
@@ -375,9 +376,9 @@ private:
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                    // Coroutine ID.
+  uint32_t id_;                   // Coroutine ID.
   CoroutineFunctionRef function_; // Coroutine body.
-  std::string name_;               // Optional name.
+  std::string name_;              // Optional name.
   int interrupt_fd_;
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
@@ -388,8 +389,8 @@ private:
   mutable bool first_resume_ = true;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  mutable CoroutineFd yield_fd_;
-  mutable std::vector<CoroutineFd> wait_fds_;
+  mutable YieldedCoroutine yield_fd_;
+  mutable std::vector<YieldedCoroutine> wait_fds_;
   mutable int num_epoll_events_ = 0;
 #else
   mutable struct pollfd event_fd_; // Pollfd for event.
@@ -413,10 +414,10 @@ private:
 // first call.
 template <typename T> class Generator : public Coroutine {
 public:
-  Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
+  Generator(CoroutineScheduler &scheduler, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(machine,
+      : Coroutine(scheduler,
                   [function = std::move(function)](const Coroutine &c) {
                     function(reinterpret_cast<Generator<T> *>(
                         const_cast<Coroutine *>(&c)));
@@ -424,10 +425,10 @@ public:
                   name, interrupt_fd, /*autostart=*/false, stack_size,
                   user_data) {}
 
-  Generator(CoroutineScheduler &machine, GeneratorFunctionRef<T> function,
+  Generator(CoroutineScheduler &scheduler, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(machine,
+      : Coroutine(scheduler,
                   [this](const Coroutine &c) {
                     gen_function_(reinterpret_cast<const Generator<T> &>(c));
                   },
@@ -494,16 +495,16 @@ private:
   template <typename T> friend class Generator;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  void AddEpollFd(int fd, uint32_t events, void* data);
-  void AddEpollFd(CoroutineFd *cfd, uint32_t events);
-  void RemoveEpollFd(CoroutineFd *cfd);
+  void AddEpollFd(int fd, uint32_t events);
+  void AddEpollFd(YieldedCoroutine *cfd, uint32_t events);
+  void RemoveEpollFd(YieldedCoroutine *cfd);
 #else
   void BuildPollFds(PollState *poll_state);
 #endif
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
-  Context& YieldCtx() { return yield_; }
+  Context &YieldCtx() { return yield_; }
   void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
@@ -512,14 +513,16 @@ private:
   Context yield_;
   std::atomic<bool> running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
+  absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
+      waiting_coroutines_;
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
-  absl::flat_hash_map<int, CoroutineFd *> coroutine_fds_;
 #else
   PollState poll_state_;
   struct pollfd interrupt_fd_;
 #endif
+
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
   absl::flat_hash_set<const Coroutine *> deletions_;
