@@ -708,7 +708,7 @@ CoroutineScheduler::CoroutineScheduler() {
     std::cerr << "Failed to create epoll fd: " << strerror(errno) << std::endl;
     abort();
   }
-  AddEpollFd(interrupt_fd_, EPOLLIN, reinterpret_cast<void*>(&interrupt_fd_));
+  AddEpollFd(interrupt_fd_, EPOLLIN);
 #else
   interrupt_fd_.fd = NewEventFd();
   interrupt_fd_.events = POLLIN;
@@ -726,14 +726,17 @@ CoroutineScheduler::~CoroutineScheduler() {
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 
-void CoroutineScheduler::AddEpollFd(int fd, uint32_t events, void* data) {
+void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   if (fd == -1) {
     return;
   }
   if (kCoDebug) {
     std::cerr << "adding raw epoll fd " << fd << std::endl;
   }
-  struct epoll_event event = {.events = events, .data = {.ptr = data}};
+  struct epoll_event event;
+  memset(&event, 0, sizeof(event));
+  event.events = events;
+  event.data.fd = fd;
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
   if (e == -1) {
     std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
