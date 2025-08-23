@@ -554,7 +554,6 @@ void Coroutine::Yield() const {
 }
 
 void Coroutine::YieldToScheduler() const {
-  SetState(State::kCoYielded);
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 }
 
@@ -797,6 +796,7 @@ void CoroutineScheduler::RemoveEpollFd(YieldedCoroutine *c) {
     }
   }
   num_epoll_events_--;
+  waiting_coroutines_.erase(c->fd);
 }
 
 #else
