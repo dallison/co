@@ -225,38 +225,38 @@ public:
   // to duplicate it by calling dup(2) for each coroutine.  The coroutine
   // will add it to the poll set and that is racy if you use the same
   // fd in two coroutines.  In fact, when using epoll, it won't be allowed.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name, size_t stack_size)
-      : Coroutine(machine, function, name, -1, true,
+      : Coroutine(scheduler, function, name, -1, true,
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
 
   // Options based constructor.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunction function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             CoroutineOptions opts)
-      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
 
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name, size_t stack_size)
-      : Coroutine(machine, function, name, -1, true,
+      : Coroutine(scheduler, function, name, -1, true,
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
 
   // Options based constructor.
-  Coroutine(CoroutineScheduler &machine, CoroutineFunctionRef function,
+  Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             CoroutineOptions opts)
-      : Coroutine(machine, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
@@ -413,10 +413,10 @@ private:
 // first call.
 template <typename T> class Generator : public Coroutine {
 public:
-  Generator(CoroutineScheduler &machine, GeneratorFunction<T> function,
+  Generator(CoroutineScheduler &scheduler, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(machine,
+      : Coroutine(scheduler,
                   [function = std::move(function)](const Coroutine &c) {
                     function(reinterpret_cast<Generator<T> *>(
                         const_cast<Coroutine *>(&c)));
@@ -424,10 +424,10 @@ public:
                   name, interrupt_fd, /*autostart=*/false, stack_size,
                   user_data) {}
 
-  Generator(CoroutineScheduler &machine, GeneratorFunctionRef<T> function,
+  Generator(CoroutineScheduler &scheduler, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(machine,
+      : Coroutine(scheduler,
                   [this](const Coroutine &c) {
                     gen_function_(reinterpret_cast<const Generator<T> &>(c));
                   },
