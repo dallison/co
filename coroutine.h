@@ -511,7 +511,7 @@ private:
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
   Context yield_;
-  bool running_ = false;
+  std::atomic<bool> running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
       waiting_coroutines_;
