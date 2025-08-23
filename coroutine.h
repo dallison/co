@@ -181,9 +181,9 @@ void __co_Invoke(class Coroutine *c);
 
 template <typename T> class Generator;
 
-struct CoroutineFd {
-  CoroutineFd() = default;
-  CoroutineFd(const Coroutine *c, int f, uint32_t e = 0)
+struct YieldedCoroutine {
+  YieldedCoroutine() = default;
+  YieldedCoroutine(const Coroutine *c, int f, uint32_t e = 0)
       : co(c), fd(f), events(e) {}
   const Coroutine *co = nullptr;
   int fd = -1;
@@ -388,8 +388,8 @@ private:
   mutable bool first_resume_ = true;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  mutable CoroutineFd yield_fd_;
-  mutable std::vector<CoroutineFd> wait_fds_;
+  mutable YieldedCoroutine yield_fd_;
+  mutable std::vector<YieldedCoroutine> wait_fds_;
   mutable int num_epoll_events_ = 0;
 #else
   mutable struct pollfd event_fd_; // Pollfd for event.
@@ -495,8 +495,8 @@ private:
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void AddEpollFd(int fd, uint32_t events);
-  void AddEpollFd(CoroutineFd *cfd, uint32_t events);
-  void RemoveEpollFd(CoroutineFd *cfd);
+  void AddEpollFd(YieldedCoroutine *cfd, uint32_t events);
+  void RemoveEpollFd(YieldedCoroutine *cfd);
 #else
   void BuildPollFds(PollState *poll_state);
 #endif
@@ -512,15 +512,16 @@ private:
   Context yield_;
   bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
+  absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>> waiting_coroutines_;
   std::vector<struct epoll_event> events_;
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
-  absl::flat_hash_map<int, CoroutineFd *> coroutine_fds_;
 #else
   PollState poll_state_;
   struct pollfd interrupt_fd_;
 #endif
+
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
   absl::flat_hash_set<const Coroutine *> deletions_;
