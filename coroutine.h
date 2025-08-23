@@ -108,13 +108,14 @@
 // indicating which context switcher is being used.
 #if 0
 #if CO_CTX_MODE == CO_CTX_CUSTOM
-#pragma message ("Using custom context switcher for coroutines.")
+#pragma message("Using custom context switcher for coroutines.")
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
-#pragma message ("Using ucontext for coroutines.")
+#pragma message("Using ucontext for coroutines.")
 #elif CO_CTX_MODE == CO_CTX_SETJMP
-#pragma message ("Using setjmp/longjmp for coroutines.")
+#pragma message("Using setjmp/longjmp for coroutines.")
 #else
-#error "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
+#error                                                                         \
+    "Unknown context switcher mode.  Please define CO_CTX_MODE to one of CO_CTX_SETJMP, CO_CTX_UCONTEXT, or CO_CTX_CUSTOM."
 #endif
 #endif
 
@@ -217,8 +218,8 @@ struct WaitFd {
 //
 // Due to stack switching, AddressSanitizer will report false-positive
 // errors (use-after-return). The principal function of a coroutine is likely
-// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER (detect_sanitizers.h)
-// to disable diagnostics related to its stack frame.
+// to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER
+// (detect_sanitizers.h) to disable diagnostics related to its stack frame.
 class Coroutine {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
@@ -375,9 +376,9 @@ private:
   std::string MakeDefaultString() const;
 
   CoroutineScheduler &scheduler_;
-  uint32_t id_;                    // Coroutine ID.
+  uint32_t id_;                   // Coroutine ID.
   CoroutineFunctionRef function_; // Coroutine body.
-  std::string name_;               // Optional name.
+  std::string name_;              // Optional name.
   int interrupt_fd_;
   mutable State state_ = State::kCoNew;
   std::vector<char> stack_;                 // Stack, allocated from malloc.
@@ -503,7 +504,7 @@ private:
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
   bool IdExists(uint32_t id) const { return coroutine_ids_.Contains(id); }
-  Context& YieldCtx() { return yield_; }
+  Context &YieldCtx() { return yield_; }
   void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
@@ -512,7 +513,8 @@ private:
   Context yield_;
   bool running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>> waiting_coroutines_;
+  absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
+      waiting_coroutines_;
   int epoll_fd_ = -1;
   int interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;

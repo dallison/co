@@ -134,16 +134,17 @@ asm(
 Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(
-          scheduler,
-          [functor = std::move(functor)](const Coroutine &c) {
-            functor(const_cast<Coroutine *>(&c));
-          },
-          std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
+    : Coroutine(scheduler,
+                [functor = std::move(functor)](const Coroutine &c) {
+                  functor(const_cast<Coroutine *>(&c));
+                },
+                std::move(name), interrupt_fd, autostart, stack_size,
+                user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef functor,
-                     std::string name, int interrupt_fd, bool autostart,
-                     size_t stack_size, void *user_data)
+Coroutine::Coroutine(CoroutineScheduler &scheduler,
+                     CoroutineFunctionRef functor, std::string name,
+                     int interrupt_fd, bool autostart, size_t stack_size,
+                     void *user_data)
     : scheduler_(scheduler), function_(std::move(functor)),
       interrupt_fd_(interrupt_fd), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
@@ -601,7 +602,7 @@ void Coroutine::Resume(int value) const {
           reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
 
-      // clang-format off
+// clang-format off
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
