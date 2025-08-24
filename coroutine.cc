@@ -479,7 +479,7 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
-int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
+int Coroutine::PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size());
   for (auto &fd : fds) {
