@@ -349,6 +349,49 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   return timer_fd;
 }
 
+int Coroutine::Poll(const std::vector<int> &fds, short event_mask) const {
+  // We use poll here regardless of the CO_POLL_MODE since it's just
+  // a simple check of the fd status.
+  std::vector<struct pollfd> pfds;
+  pfds.reserve(fds.size() + 1);
+  for (auto &fd : fds) {
+    pfds.push_back({.fd = fd, .events = short(event_mask)});
+  }
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    pfds.push_back(ifd);
+  }
+  int ret = ::poll(pfds.data(), pfds.size(), 0);
+  if (ret <= 0) {
+    return -1;
+  }
+  for (auto &pfd : pfds) {
+    if (pfd.revents & (event_mask | POLLOUT)) {
+      return pfd.fd;
+    }
+  }
+  return -1;
+}
+
+int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
+  // We use poll here regardless of the CO_POLL_MODE since it's just
+  // a simple check of the fd status.
+  std::vector<struct pollfd> pfds = fds;
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    pfds.push_back(ifd);
+  }
+  int ret = ::poll(pfds.data(), pfds.size(), 0);
+  if (ret <= 0) {
+    return -1;
+  }
+  for (auto &pfd : pfds) {
+    if (pfd.revents & (pfd.events | POLLOUT)) {
+      return pfd.fd;
+    }
+  }
+  return -1;
+}
 int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
@@ -401,6 +444,24 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   return EndOfWait(timer_fd);
 }
 
+int Coroutine::PollAndWait(int fd, uint32_t event_mask,
+                           uint64_t timeout_ns) const {
+  int n = Poll({fd}, event_mask);
+  if (n != -1) {
+    return n;
+  }
+  return Wait(fd, event_mask, timeout_ns);
+}
+
+int Coroutine::PollAndWait(const std::vector<int> &fds, uint32_t event_mask,
+                    uint64_t timeout_ns) const {
+  int n = Poll(fds, event_mask);
+  if (n != -1) {
+    return n;
+  }
+  return Wait(fds, event_mask, timeout_ns);
+}
+
 #if CO_POLL_MODE == CO_POLL_EPOLL
 int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   for (auto &fd : fds) {
@@ -418,6 +479,23 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
+int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
+  std::vector<struct pollfd> pfds;
+  pfds.reserve(fds.size());
+  for (auto &fd : fds) {
+    pfds.push_back({.fd = fd.fd, .events = short(fd.events)});
+  }
+  if (interrupt_fd_ != -1) {
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    pfds.push_back(ifd);
+  }
+  int n = Poll(pfds);
+  if (n != -1) {
+    return n;
+  }
+  return Wait(fds, timeout_ns);
+}
+
 #else
 int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
   wait_fds_.push_back(fd);
@@ -452,6 +530,24 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
 
   // Get here when resumed.
   return EndOfWait(timer_fd);
+}
+
+int Coroutine::PollAndWait(struct pollfd &fd, uint64_t timeout_ns) const {
+  int n = Poll({fd});
+  if (n != -1) {
+    return fd.fd;
+  }
+  return Wait(fd, timeout_ns);
+}
+
+int Coroutine::PollAndWait(const std::vector<struct pollfd> &fds,
+                    uint64_t timeout_ns) const {
+
+  int n = Poll(fds);
+  if (n != -1) {
+    return n;
+  }
+  return Wait(fds, timeout_ns);
 }
 #endif
 

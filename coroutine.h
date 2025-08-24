@@ -274,6 +274,10 @@ public:
   // Call another coroutine and store the result.
   template <typename T> T Call(Generator<T> &callee) const;
 
+  // returns -1 for no fd ready, fd if one is ready.
+  int Poll(const std::vector<int>& fds, short event_mask = POLLIN) const;
+  int Poll(const std::vector<struct pollfd>& fds) const;
+
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
   // one of the fds) becomes ready, Wait will return -1. If an fd is ready, Wait
@@ -287,8 +291,16 @@ public:
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
            uint64_t timeout_ns = 0) const;
 
+           // Poll first and if the fd is not ready, wait for it.
+             int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
+
+  // Wait for a set of fds, all with the same event mask.
+  int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
+           uint64_t timeout_ns = 0) const;
+
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
+  int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
 #else
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int Wait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
@@ -296,6 +308,13 @@ public:
   // Wait for a set of pollfds.  Each needs to specify an fd and an event.
   // Returns the fd that was triggered, or -1 for a timeout.
   int Wait(const std::vector<struct pollfd> &fds,
+           uint64_t timeout_ns = 0) const;
+    // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+  int PollAndWait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
+
+  // Wait for a set of pollfds.  Each needs to specify an fd and an event.
+  // Returns the fd that was triggered, or -1 for a timeout.
+  int PollAndWait(const std::vector<struct pollfd> &fds,
            uint64_t timeout_ns = 0) const;
 #endif
 
