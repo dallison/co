@@ -55,6 +55,25 @@ TEST(CoroutineTest, Sleep) {
   std::cerr << "done" << std::endl;
 }
 
+TEST(CoroutineTest, CatchSignal) {
+  co::CoroutineScheduler scheduler;
+  bool sleeper_woke_up = false;
+  co::Coroutine c_sleeper(scheduler, [&sleeper_woke_up](co::Coroutine *c) {
+    c->Millisleep(1000);
+    sleeper_woke_up = true;
+  });
+  co::Coroutine c_killer(scheduler, [](co::Coroutine *c) {
+    c->Millisleep(10);
+    ::kill(getpid(), SIGUSR1);
+  });
+  scheduler.AddSignalHandler(SIGUSR1, [](int signum, co::CoroutineScheduler &sched) {
+    EXPECT_EQ(signum, SIGUSR1);
+    sched.Stop();
+  });
+  scheduler.Run();
+  EXPECT_FALSE(sleeper_woke_up);
+}
+
 TEST(CoroutinesTest, Wait) {
   co::CoroutineScheduler scheduler;
   int pipes[2];
