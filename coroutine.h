@@ -291,8 +291,8 @@ public:
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
            uint64_t timeout_ns = 0) const;
 
-           // Poll first and if the fd is not ready, wait for it.
-             int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
+  // Poll first and if the fd is not ready, wait for it.
+  int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
 
   // Wait for a set of fds, all with the same event mask.
   int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
@@ -469,6 +469,8 @@ struct PollState {
   std::vector<Coroutine *> coroutines;
 };
 
+class SignalCatcher; // Forward declaration.
+
 class CoroutineScheduler {
 public:
   CoroutineScheduler();
@@ -509,6 +511,10 @@ public:
 
   std::vector<int> GetAllFds() const;
 
+  using SignalHandler = std::function<void(int, CoroutineScheduler&)>;
+  void AddSignalHandler(int signum, SignalHandler handler_callback);
+  void RemoveSignalHandler(int signum);
+
 private:
   friend class Coroutine;
   template <typename T> friend class Generator;
@@ -541,6 +547,8 @@ private:
   PollState poll_state_;
   struct pollfd interrupt_fd_;
 #endif
+
+  std::unique_ptr<SignalCatcher> signal_catcher_;
 
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
