@@ -150,3 +150,86 @@ TEST(CoroutinesTest, MultipleFd) {
 }
 
 #endif
+
+TEST(CoroutinesTest, NonInvasive) {
+  co::CoroutineScheduler scheduler;
+  scheduler.Spawn([]() {
+    std::cerr << "coroutine running\n";
+    co::Yield();
+    std::cerr << "coroutine exiting\n";
+  });
+
+  scheduler.Run();
+}
+
+TEST(CoroutinesTest, NonInvasiveWaitWithName) {
+  co::CoroutineScheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  scheduler.Spawn(
+      [pipes]() {
+        std::cerr << "coroutine running\n";
+        int fd = co::Wait(pipes[0]);
+        ASSERT_EQ(pipes[0], fd);
+        char c;
+        ASSERT_EQ(1, read(fd, &c, 1));
+        ASSERT_EQ('a', c);
+        std::cerr << "coroutine exiting\n";
+      },
+      {.name = "foo"});
+
+  scheduler.Spawn([pipes]() {
+    char c = 'a';
+    ASSERT_EQ(1, write(pipes[1], &c, 1));
+  });
+  scheduler.Run();
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(CoroutinesTest, NonInvasiveWaitWithTimeout) {
+  co::CoroutineScheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  // Will timeout.
+  scheduler.Spawn(
+      [pipes]() {
+        std::cerr << "coroutine running\n";
+        int fd = co::Wait(pipes[0], std::chrono::milliseconds(100));
+        ASSERT_EQ(-1, fd);
+        std::cerr << "coroutine exiting\n";
+      },
+      {.name = "bar"});
+
+  scheduler.Run();
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(CoroutinesTest, NonInvasive2) {
+  co::CoroutineScheduler scheduler;
+  for (int i = 0; i < 10; i++) {
+    scheduler.Spawn([i]() {
+      std::cerr << "coroutine " << i << " running\n";
+      co::Millisleep(100);
+      std::cerr << "coroutine " << i << " exiting\n";
+    });
+  }
+
+  scheduler.Run();
+}
+
+TEST(CoroutinesTest, NonInvasiveTemplated) {
+  co::CoroutineScheduler scheduler;
+  for (int i = 0; i < 10; i++) {
+    scheduler.Spawn([i]() {
+      std::cerr << "coroutine " << i << " running\n";
+      co::Sleep(std::chrono::milliseconds(100));
+      std::cerr << "coroutine " << i << " exiting\n";
+    });
+  }
+
+  scheduler.Run();
+}

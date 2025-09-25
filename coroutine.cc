@@ -134,12 +134,21 @@ asm(
 Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(scheduler,
-                [functor = std::move(functor)](const Coroutine &c) {
-                  functor(const_cast<Coroutine *>(&c));
-                },
-                std::move(name), interrupt_fd, autostart, stack_size,
-                user_data) {}
+    : Coroutine(
+          scheduler,
+          [functor = std::move(functor)](const Coroutine &c) {
+            functor(const_cast<Coroutine *>(&c));
+          },
+          std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
+
+Coroutine::Coroutine(CoroutineScheduler &scheduler,
+                     std::function<void()> functor, std::string name,
+                     int interrupt_fd, bool autostart, size_t stack_size,
+                     void *user_data)
+    : Coroutine(
+          scheduler,
+          [functor = std::move(functor)](const Coroutine &) { functor(); },
+          std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
 
 Coroutine::Coroutine(CoroutineScheduler &scheduler,
                      CoroutineFunctionRef functor, std::string name,
@@ -283,7 +292,7 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
-void Coroutine::Exit() { SETCONTEXT(exit_); }
+void Coroutine::Exit() const { SETCONTEXT(exit_); }
 
 void Coroutine::Start() {
   if (state_ == State::kCoNew) {
@@ -454,7 +463,7 @@ int Coroutine::PollAndWait(int fd, uint32_t event_mask,
 }
 
 int Coroutine::PollAndWait(const std::vector<int> &fds, uint32_t event_mask,
-                    uint64_t timeout_ns) const {
+                           uint64_t timeout_ns) const {
   int n = Poll(fds, event_mask);
   if (n != -1) {
     return n;
@@ -479,7 +488,8 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   // Get here when resumed.
   return EndOfWait(timer_fd);
 }
-int Coroutine::PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
+int Coroutine::PollAndWait(const std::vector<WaitFd> &fds,
+                           uint64_t timeout_ns) const {
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size());
   for (auto &fd : fds) {
@@ -541,7 +551,7 @@ int Coroutine::PollAndWait(struct pollfd &fd, uint64_t timeout_ns) const {
 }
 
 int Coroutine::PollAndWait(const std::vector<struct pollfd> &fds,
-                    uint64_t timeout_ns) const {
+                           uint64_t timeout_ns) const {
 
   int n = Poll(fds);
   if (n != -1) {
@@ -698,7 +708,7 @@ void Coroutine::Resume(int value) const {
           reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
 
-// clang-format off
+      // clang-format off
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
@@ -924,6 +934,7 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 
 void CoroutineScheduler::Run() {
   running_ = true;
+  co::scheduler = this; // Thread local.
 #if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> epoll_events;
 #endif
@@ -1089,11 +1100,30 @@ void CoroutineScheduler::Run() {
       }
       triggered.Set(c->co->Id());
 
+      // Set the thread local 'self' to point to the the currently running
+      // coroutine.
+      co::self = c->co;
       c->co->Resume(c->fd);
       // Never get here.
     }
     CommitDeletions();
   }
+}
+
+co::Coroutine *CoroutineScheduler::Spawn(std::function<void(co::Coroutine *)> f,
+                                         CoroutineOptions opts) {
+  auto co = std::make_unique<co::Coroutine>(*this, f, opts);
+  auto cp = co.get();
+  owned_coroutines_.insert(std::move(co));
+  return cp;
+}
+
+co::Coroutine *CoroutineScheduler::Spawn(std::function<void()> f,
+                                         CoroutineOptions opts) {
+  auto co = std::make_unique<co::Coroutine>(*this, f, opts);
+  auto cp = co.get();
+  owned_coroutines_.insert(std::move(co));
+  return cp;
 }
 
 #if CO_POLL_MODE == CO_POLL_POLL
@@ -1124,6 +1154,9 @@ void CoroutineScheduler::CommitDeletions() {
         // Call completion callback to allow for external memory management.
         if (completion_callback_ != nullptr) {
           completion_callback_(const_cast<Coroutine *>(c));
+        }
+        if (owned_coroutines_.contains(c)) {
+          owned_coroutines_.erase(c);
         }
         break;
       }
@@ -1179,6 +1212,78 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
     co->GetAllFds(fds);
   }
   return fds;
+}
+
+// Non-invasive coroutine functions.
+thread_local const co::Coroutine *self;
+thread_local co::CoroutineScheduler *scheduler;
+
+void Yield() { self->Yield(); }
+
+int Poll(const std::vector<int> &fds, short event_mask) {
+  return self->Poll(fds, event_mask);
+}
+int Poll(const std::vector<struct pollfd> &fds) { return self->Poll(fds); }
+
+int Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
+  return self->Wait(fd, event_mask, timeout_ns);
+}
+
+// Wait for a set of fds, all with the same event mask.
+int Wait(const std::vector<int> &fd, uint32_t event_mask, uint64_t timeout_ns) {
+  return self->Wait(fd, event_mask, timeout_ns);
+}
+
+// Poll first and if the fd is not ready, wait for it.
+int PollAndWait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
+  return self->PollAndWait(fd, event_mask, timeout_ns);
+}
+
+// Wait for a set of fds, all with the same event mask.
+int PollAndWait(const std::vector<int> &fd, uint32_t event_mask,
+                uint64_t timeout_ns) {
+  return self->PollAndWait(fd, event_mask, timeout_ns);
+}
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
+  return self->Wait(fds, timeout_ns);
+}
+int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
+  return self->Wait(fds, timeout_ns);
+}
+#else
+// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+int Wait(struct pollfd &fd, uint64_t timeout_ns) {
+  return self->Wait(fd, timeout_ns);
+}
+
+// Wait for a set of pollfds.  Each needs to specify an fd and an event.
+// Returns the fd that was triggered, or -1 for a timeout.
+int Wait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns) {
+  return self->Wait(fds, timeout_ns);
+}
+// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+int PollAndWait(struct pollfd &fd, uint64_t timeout_ns) {
+  return self->PollAndWait(fd, timeout_ns);
+}
+
+// Wait for a set of pollfds.  Each needs to specify an fd and an event.
+// Returns the fd that was triggered, or -1 for a timeout.
+int PollAndWait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns) {
+  return self->PollAndWait(fds, timeout_ns);
+}
+#endif
+
+void Exit() { return self->Exit(); }
+
+// Sleeping functions.
+void Nanosleep(uint64_t ns) { return self->Nanosleep(ns); }
+void Millisleep(time_t msecs) {
+  Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
+}
+void Sleep(time_t secs) {
+  Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
 }
 
 } // namespace co

@@ -239,7 +239,7 @@ public:
   // Options based constructor.
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             CoroutineOptions opts)
-      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
@@ -254,14 +254,30 @@ public:
                   stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
   }
 
+  Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
+            std::string name = "", int interrupt_fd = -1, bool autostart = true,
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+
+  Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
+            std::string name, size_t stack_size)
+      : Coroutine(scheduler, function, name, -1, true,
+                  stack_size == 0 ? kCoDefaultStackSize : stack_size, nullptr) {
+  }
+
   // Options based constructor.
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             CoroutineOptions opts)
-      : Coroutine(scheduler, function, opts.name, opts.interrupt_fd,
+      : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
 
+  Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
+            CoroutineOptions opts)
+      : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
+                  opts.autostart,
+                  opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
+                  opts.user_data) {}
   ~Coroutine();
 
   // Start a coroutine running if it is not already running,
@@ -275,8 +291,8 @@ public:
   template <typename T> T Call(Generator<T> &callee) const;
 
   // returns -1 for no fd ready, fd if one is ready.
-  int Poll(const std::vector<int>& fds, short event_mask = POLLIN) const;
-  int Poll(const std::vector<struct pollfd>& fds) const;
+  int Poll(const std::vector<int> &fds, short event_mask = POLLIN) const;
+  int Poll(const std::vector<struct pollfd> &fds) const;
 
   // For all Wait functions, the timeout is optional and if greater than zero
   // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
@@ -291,16 +307,18 @@ public:
   int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
            uint64_t timeout_ns = 0) const;
 
-           // Poll first and if the fd is not ready, wait for it.
-             int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
+  // Poll first and if the fd is not ready, wait for it.
+  int PollAndWait(int fd, uint32_t event_mask = POLLIN,
+                  uint64_t timeout_ns = 0) const;
 
   // Wait for a set of fds, all with the same event mask.
   int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-           uint64_t timeout_ns = 0) const;
+                  uint64_t timeout_ns = 0) const;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
-  int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
+  int PollAndWait(const std::vector<WaitFd> &fds,
+                  uint64_t timeout_ns = 0) const;
 #else
   // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int Wait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
@@ -309,16 +327,59 @@ public:
   // Returns the fd that was triggered, or -1 for a timeout.
   int Wait(const std::vector<struct pollfd> &fds,
            uint64_t timeout_ns = 0) const;
-    // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+  // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
   int PollAndWait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
 
   // Wait for a set of pollfds.  Each needs to specify an fd and an event.
   // Returns the fd that was triggered, or -1 for a timeout.
   int PollAndWait(const std::vector<struct pollfd> &fds,
-           uint64_t timeout_ns = 0) const;
+                  uint64_t timeout_ns = 0) const;
 #endif
 
-  void Exit();
+  // Templated waits with chrono timeouts.
+  template <class T, class Rep, class Period>
+  int Wait(const T &fd, uint32_t events,
+           std::chrono::duration<Rep, Period> duration) const {
+    return Wait(
+        fd, events,
+        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+            duration)
+            .count());
+  }
+
+  template <class T, class Rep, class Period>
+  int Wait(const T &fd, std::chrono::duration<Rep, Period> duration) const {
+    return Wait(
+        fd, POLLIN,
+        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+            duration)
+            .count());
+  }
+
+  template <class T, class Rep, class Period>
+  int PollAndWait(const T &fd, uint32_t events,
+                  std::chrono::duration<Rep, Period> duration) const {
+    return PollAndWait(
+        fd, events,
+        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+            duration)
+            .count());
+  }
+
+  template <class T, class Rep, class Period>
+  int PollAndWait(const T &fd,
+                  std::chrono::duration<Rep, Period> duration) const {
+    return PollAndWait(
+        fd, std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+                duration)
+                .count());
+  }
+
+  // Note this can cause memory leaks as destructors in the coroutine function
+  // will not be called.  Use sparingly.  You should really use an interrupt fd
+  // to cause the function to exit cleanly, but this can get you out of stick
+  // situations if you need it.
+  void Exit() const;
 
   // Sleeping functions.
   void Nanosleep(uint64_t ns) const;
@@ -327,6 +388,13 @@ public:
   }
   void Sleep(time_t secs) const {
     Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
+  }
+
+  template <class Rep, class Period>
+  void Sleep(std::chrono::duration<Rep, Period> duration) const {
+    Nanosleep(std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+                  duration)
+                  .count());
   }
 
   // Set and get the name.  You can change the name at any time.  It's
@@ -436,23 +504,23 @@ public:
   Generator(CoroutineScheduler &scheduler, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(scheduler,
-                  [function = std::move(function)](const Coroutine &c) {
-                    function(reinterpret_cast<Generator<T> *>(
-                        const_cast<Coroutine *>(&c)));
-                  },
-                  name, interrupt_fd, /*autostart=*/false, stack_size,
-                  user_data) {}
+      : Coroutine(
+            scheduler,
+            [function = std::move(function)](const Coroutine &c) {
+              function(reinterpret_cast<Generator<T> *>(
+                  const_cast<Coroutine *>(&c)));
+            },
+            name, interrupt_fd, /*autostart=*/false, stack_size, user_data) {}
 
   Generator(CoroutineScheduler &scheduler, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(scheduler,
-                  [this](const Coroutine &c) {
-                    gen_function_(reinterpret_cast<const Generator<T> &>(c));
-                  },
-                  name, interrupt_fd, /*autostart=*/false, stack_size,
-                  user_data),
+      : Coroutine(
+            scheduler,
+            [this](const Coroutine &c) {
+              gen_function_(reinterpret_cast<const Generator<T> &>(c));
+            },
+            name, interrupt_fd, /*autostart=*/false, stack_size, user_data),
         gen_function_(function) {}
 
   // Yield control and store value.
@@ -509,6 +577,10 @@ public:
 
   std::vector<int> GetAllFds() const;
 
+  co::Coroutine *Spawn(std::function<void(co::Coroutine *)> f,
+                       CoroutineOptions opts = {});
+  co::Coroutine *Spawn(std::function<void()> f, CoroutineOptions opts = {});
+
 private:
   friend class Coroutine;
   template <typename T> friend class Generator;
@@ -527,6 +599,9 @@ private:
   void CommitDeletions();
 
   std::list<Coroutine *> coroutines_;
+  // These are coroutines owned by the scheduler (created using Spawn).
+  absl::flat_hash_set<std::unique_ptr<Coroutine>> owned_coroutines_;
+
   BitSet coroutine_ids_;
   uint32_t last_freed_coroutine_id_ = -1U;
   Context yield_;
@@ -565,6 +640,92 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
   // Call done.  No result now.
   callee.result_ = nullptr;
   return result;
+}
+
+// Non-invasive coroutine functions.
+// The 'co::self' variable holds a pointer to the currently running coroutine
+// The 'co::sheduler' variable holds a pointer to the a coroutine's scheduler
+//   object.  This is available inside a coroutine as a convenience to
+//   get the scheduler.  It can also be obtained using 'self->Scheduler()'
+//
+// These are both thread local so each scheduler will have its own copy,
+// assuming that you are running a scheduler in a thread.  I can't think of a
+// reason or way to run multiple schedulers in the same thread.
+extern thread_local const co::Coroutine *self;
+extern thread_local co::CoroutineScheduler *scheduler;
+
+void Yield();
+
+int Poll(const std::vector<int> &fds, short event_mask = POLLIN);
+int Poll(const std::vector<struct pollfd> &fds);
+
+int Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
+
+// Wait for a set of fds, all with the same event mask.
+int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
+         uint64_t timeout_ns = 0);
+
+// Poll first and if the fd is not ready, wait for it.
+int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
+
+// Wait for a set of fds, all with the same event mask.
+int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
+                uint64_t timeout_ns = 0);
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
+int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
+#else
+// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
+
+// Wait for a set of pollfds.  Each needs to specify an fd and an event.
+// Returns the fd that was triggered, or -1 for a timeout.
+int Wait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns = 0);
+// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
+int PollAndWait(struct pollfd &fd, uint64_t timeout_ns = 0);
+
+// Wait for a set of pollfds.  Each needs to specify an fd and an event.
+// Returns the fd that was triggered, or -1 for a timeout.
+int PollAndWait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns = 0);
+#endif
+
+template <class T, class Rep, class Period>
+int Wait(const T &fd, uint32_t events,
+         std::chrono::duration<Rep, Period> duration) {
+  return self->Wait(fd, events, duration);
+}
+
+template <class T, class Rep, class Period>
+int Wait(const T &fd, std::chrono::duration<Rep, Period> duration) {
+  return self->Wait<T, Rep, Period>(fd, duration);
+}
+
+template <class T, class Rep, class Period>
+int PollAndWait(const T &fd, uint32_t events,
+                std::chrono::duration<Rep, Period> duration) {
+  return self->PollAndWait(fd, events, duration);
+}
+
+template <class T, class Rep, class Period>
+int PollAndWait(const T &fd, std::chrono::duration<Rep, Period> duration) {
+  return self->PollAndWait(fd, duration);
+}
+
+// Note this can cause memory leaks as destructors in the coroutine function
+// will not be called.  Use sparingly.  You should really use an interrupt fd
+// to cause the function to exit cleanly, but this can get you out of stick
+// situations if you need it.
+void Exit();
+
+// Sleeping functions.
+void Nanosleep(uint64_t ns);
+void Millisleep(time_t msecs);
+void Sleep(time_t secs);
+
+template <class Rep, class Period>
+void Sleep(std::chrono::duration<Rep, Period> duration) {
+  return self->Sleep(duration);
 }
 
 } // namespace co
