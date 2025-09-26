@@ -370,7 +370,7 @@ public:
   int PollAndWait(const T &fd,
                   std::chrono::duration<Rep, Period> duration) const {
     return PollAndWait(
-        fd, std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+        fd, POLLIN, std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
                 duration)
                 .count());
   }
