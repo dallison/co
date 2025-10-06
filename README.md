@@ -1,5 +1,7 @@
 # Coroutine library in C++
 
+(for new features, take a look at the `NEW_FEATURES.md` file).
+
 This a cool library that implements coroutines in C++17.  It has absolutely nothing
 to do with the upcoming (as of writing) C++20 coroutines facility.
 
