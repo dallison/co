@@ -147,7 +147,7 @@ using Context = co::CoroutineContext;
 #include "bitset.h"
 #include "detect_sanitizers.h"
 
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
 extern "C" {
 void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom,
                                     size_t size);
@@ -641,7 +641,7 @@ private:
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
   absl::flat_hash_set<const Coroutine *> deletions_;
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
   void *fake_stack_ = nullptr;
 #endif
 };

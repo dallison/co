@@ -48,7 +48,7 @@ constexpr bool kCoDebug = false;
 // For ASAN we need to tell it when we are switching stacks.
 // See https://github.com/google/sanitizers/issues/189
 // for details.
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
 #define SWAPCONTEXT(from, to)                                                  \
   do {                                                                         \
     __sanitizer_finish_switch_fiber(scheduler_.fake_stack_, nullptr, nullptr); \
@@ -697,7 +697,7 @@ void Coroutine::YieldNonTemplate() const {
 }
 
 void Coroutine::InvokeFunction() {
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
   function_(*this);
@@ -722,7 +722,7 @@ void Coroutine::Resume(int value) const {
     // we longjmp to the exit environment with the stack restored
     // to the current one, which is the stack used by the
     // CoroutineScheduler.
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
                                    stack_.size());
 #endif
@@ -810,7 +810,7 @@ void Coroutine::Resume(int value) const {
     // Should never get here.
     break;
   case State::kCoDead:
-#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#if defined(CO_ADDRESS_SANITIZER)
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
                                    stack_.size());
 #endif
