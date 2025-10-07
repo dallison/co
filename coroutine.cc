@@ -1207,6 +1207,14 @@ uint32_t CoroutineScheduler::AllocateId() {
   return id;
 }
 
+void CoroutineScheduler::TriggerInterrupt() const {
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  TriggerEvent(interrupt_fd_);
+#else
+  TriggerEvent(interrupt_fd_.fd);
+#endif
+}
+
 void CoroutineScheduler::Stop() {
   running_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL

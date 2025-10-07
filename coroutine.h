@@ -574,15 +574,7 @@ public:
 #endif
   }
 
-  void TriggerInterrupt() const {
-    uint64_t one = 1;
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    (void)write(interrupt_fd_, &one, sizeof(one));
-#else
-    (void)write(interrupt_fd_.fd, &one, sizeof(one));
-#endif
-  }
+  void TriggerInterrupt() const;
 
 #if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
