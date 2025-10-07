@@ -643,7 +643,7 @@ private:
   size_t num_epoll_events_ = 0;
 #else
   PollState poll_state_;
-  struct pollfd interrupt_fd_;
+  struct pollfd interrupt_fd_ = {-1, POLLIN, 0};
 #endif
 
   uint64_t tick_count_ = 0;
