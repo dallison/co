@@ -45,7 +45,24 @@ constexpr bool kCoDebug = false;
 #else
 #define SETCONTEXT(ctx) CoroutineSetContext(&ctx)
 #define GETCONTEXT(ctx) CoroutineGetContext(&ctx)
-#define SWAPCONTEXT(from, to) CoroutineSwapContext(&from, &to)
+// For ASAN we need to tell it when we are switching stacks.
+// See https://github.com/google/sanitizers/issues/189
+// for details.
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+#define SWAPCONTEXT(from, to)                                                  \
+  do {                                                                         \
+    __sanitizer_finish_switch_fiber(scheduler_.fake_stack_, nullptr, nullptr); \
+    CoroutineSwapContext(&from, &to);                                          \
+    __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),     \
+                                   stack_.size());                             \
+  } while (0)
+#else
+#define SWAPCONTEXT(from, to)                                                  \
+  do {                                                                         \
+    CoroutineSwapContext(&from, &to);                                          \
+  } while (0)
+#endif
+
 #endif
 
 namespace co {
@@ -679,7 +696,12 @@ void Coroutine::YieldNonTemplate() const {
   // We get here when resumed from another call.
 }
 
-void Coroutine::InvokeFunction() { function_(*this); }
+void Coroutine::InvokeFunction() {
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+  __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
+#endif
+  function_(*this);
+}
 
 // We use an intermediate function to do the invocation of
 // the coroutine's function because we really want to avoid
@@ -700,6 +722,10 @@ void Coroutine::Resume(int value) const {
     // we longjmp to the exit environment with the stack restored
     // to the current one, which is the stack used by the
     // CoroutineScheduler.
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+    __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
+                                   stack_.size());
+#endif
     SetState(State::kCoRunning);
     yielded_address_ = nullptr;
 #if CO_CTX_MODE == CO_CTX_SETJMP
@@ -784,6 +810,10 @@ void Coroutine::Resume(int value) const {
     // Should never get here.
     break;
   case State::kCoDead:
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+    __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
+                                   stack_.size());
+#endif
     SETCONTEXT(exit_);
     break;
   }

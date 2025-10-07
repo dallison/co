@@ -147,6 +147,16 @@ using Context = co::CoroutineContext;
 #include "bitset.h"
 #include "detect_sanitizers.h"
 
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+extern "C" {
+void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom,
+                                    size_t size);
+
+void __sanitizer_finish_switch_fiber(void *fake_stack_save,
+                                     const void **bottom_old, size_t *size_old);
+}
+#endif
+
 namespace co {
 
 class CoroutineScheduler;
@@ -370,9 +380,10 @@ public:
   int PollAndWait(const T &fd,
                   std::chrono::duration<Rep, Period> duration) const {
     return PollAndWait(
-        fd, POLLIN, std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-                duration)
-                .count());
+        fd, POLLIN,
+        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
+            duration)
+            .count());
   }
 
   // Note this can cause memory leaks as destructors in the coroutine function
@@ -555,6 +566,24 @@ public:
   void RemoveCoroutine(const Coroutine *c);
   void StartCoroutine(Coroutine *c);
 
+  int GetInterruptFd() const {
+#if CO_POLL_MODE == CO_POLL_EPOLL
+    return interrupt_fd_;
+#else
+    return interrupt_fd_.fd;
+#endif
+  }
+
+  void TriggerInterrupt() const {
+    uint64_t one = 1;
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+    (void)write(interrupt_fd_, &one, sizeof(one));
+#else
+    (void)write(interrupt_fd_.fd, &one, sizeof(one));
+#endif
+  }
+
 #if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
   // functions allow you to incorporate the multiplexed
@@ -620,6 +649,9 @@ private:
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
   absl::flat_hash_set<const Coroutine *> deletions_;
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+  void *fake_stack_ = nullptr;
+#endif
 };
 
 template <typename T>
