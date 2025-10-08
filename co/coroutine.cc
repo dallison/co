@@ -839,15 +839,19 @@ void Coroutine::GetAllFds(std::vector<int> &fds) const {
 CoroutineScheduler::CoroutineScheduler() {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   interrupt_fd_ = NewEventFd();
+  co_interrupt_fd_ = NewEventFd();
   epoll_fd_ = epoll_create1(0);
   if (epoll_fd_ == -1) {
     std::cerr << "Failed to create epoll fd: " << strerror(errno) << std::endl;
     abort();
   }
   AddEpollFd(interrupt_fd_, EPOLLIN);
+  AddEpollFd(co_interrupt_fd_, EPOLLIN);
 #else
   interrupt_fd_.fd = NewEventFd();
   interrupt_fd_.events = POLLIN;
+  co_interrupt_fd_.fd = NewEventFd();
+  co_interrupt_fd_.events = POLLIN;
 #endif
 }
 
@@ -945,6 +949,7 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
   poll_state->coroutines.clear();
 
   poll_state->pollfds.push_back(interrupt_fd_);
+  poll_state->pollfds.push_back(co_interrupt_fd_);
   for (auto *c : coroutines_) {
     auto state = c->GetState();
     if (state == Coroutine::State::kCoNew ||
@@ -1009,8 +1014,11 @@ void CoroutineScheduler::Run() {
       }
       auto it = waiting_coroutines_.find(event.data.fd);
       if (it == waiting_coroutines_.end()) {
-
-        events.push_back({nullptr, event.data.fd, 0});
+        if (event.data.fd == interrupt_fd_) {
+          events.push_back(YieldedCoroutine(nullptr, interrupt_fd_));
+        } else if (event.data.fd == co_interrupt_fd_) {
+          events.push_back(YieldedCoroutine(nullptr, co_interrupt_fd_));
+        }
         continue;
       }
       for (auto &list : it->second) {
@@ -1042,6 +1050,12 @@ void CoroutineScheduler::Run() {
           events.push_back(c);
           continue;
         }
+        if (i == 1) {
+          // Co interrupt fd.
+          YieldedCoroutine c = {nullptr, poll_state_.pollfds[i].fd, 0};
+          events.push_back(c);
+          continue;
+        }
         YieldedCoroutine c = {poll_state_.coroutines[i - 1],
                               poll_state_.pollfds[i].fd, 0};
         events.push_back(c);
@@ -1051,8 +1065,13 @@ void CoroutineScheduler::Run() {
 
     // Sort the events by the time they have been waiting.
     std::sort(events.begin(), events.end(),
-              [](const YieldedCoroutine &a, const YieldedCoroutine &b) {
-                if (a.co == nullptr || b.co == nullptr) {
+              [this](const YieldedCoroutine &a, const YieldedCoroutine &b) {
+                if (a.fd == interrupt_fd_ || b.fd == interrupt_fd_) {
+                  // Interrupt fd always goes first.
+                  return true;
+                }
+                if (a.fd == co_interrupt_fd_ || b.fd == co_interrupt_fd_) {
+                  // Co interrupt fd always goes last.
                   return false;
                 }
                 return a.co->LastTick() < b.co->LastTick();
@@ -1087,7 +1106,7 @@ void CoroutineScheduler::Run() {
       }
       YieldedCoroutine *c = &events[index];
       index++;
-      if (c->co == nullptr) {
+      if (c->fd == interrupt_fd_) {
 // Interrupt fd.
 #if CO_POLL_MODE == CO_POLL_EPOLL
         ClearEvent(interrupt_fd_);
@@ -1096,7 +1115,15 @@ void CoroutineScheduler::Run() {
 #endif
         continue;
       }
+      if (c->fd == co_interrupt_fd_) {
+        // Coroutine interrupt triggered, don't clear it.
+        continue;
+      }
 
+      if (c->co == nullptr) {
+        // Shouldn't happen.
+        continue;
+      }
       tick_count_++;
 
       if (processed_fds.Contains(c->fd)) {
@@ -1133,6 +1160,7 @@ void CoroutineScheduler::Run() {
       // Set the thread local 'self' to point to the the currently running
       // coroutine.
       co::self = c->co;
+      OnResume(c->co);
       c->co->Resume(c->fd);
       // Never get here.
     }
@@ -1209,9 +1237,9 @@ uint32_t CoroutineScheduler::AllocateId() {
 
 void CoroutineScheduler::TriggerInterrupt() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  TriggerEvent(interrupt_fd_);
+  TriggerEvent(co_interrupt_fd_);
 #else
-  TriggerEvent(interrupt_fd_.fd);
+  TriggerEvent(co_interrupt_fd_.fd);
 #endif
 }
 
@@ -1243,8 +1271,10 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   fds.push_back(epoll_fd_);
   fds.push_back(interrupt_fd_);
+  fds.push_back(co_interrupt_fd_);
 #else
   fds.push_back(interrupt_fd_.fd);
+  fds.push_back(co_interrupt_fd_.fd);
 #endif
   for (auto *co : coroutines_) {
     co->GetAllFds(fds);

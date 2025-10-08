@@ -1,80 +1,17 @@
 package(default_visibility = ["//visibility:public"])
 
 config_setting(
-    name = "macos_arm64",
-    values = {"cpu": "darwin_arm64"},
+  name = "macos_arm64",
+  values = {"cpu": "darwin_arm64"},
 )
 
 config_setting(
-    name = "macos_default",
-    values = {"cpu": "darwin"},
+  name = "macos_default",
+  values = {"cpu": "darwin"},
 )
 
 config_setting(
-    name = "macos_x86_64",
-    values = {"cpu": "darwin_x86_64"},
+  name = "macos_x86_64",
+  values = {"cpu": "darwin_x86_64"},
 )
 
-cc_library(
-    name = "co",
-    srcs = [
-        "context.S",
-        "coroutine.cc",
-    ],
-    hdrs = [
-        "bitset.h",
-        "context.h",
-        "coroutine.h",
-        "detect_sanitizers.h",
-    ],
-    copts = [
-        "-Wall",
-    ],
-    deps = select({
-        "//:macos_x86_64": [],
-        "//:macos_arm64": [],
-        "//:macos_default": [],
-        "//conditions:default": ["@com_google_absl//absl/container:flat_hash_map"],
-    }) + [
-        "@com_google_absl//absl/container:flat_hash_set",
-    ],
-)
-
-cc_binary(
-    name = "cotest",
-    srcs = ["cotest.cc"],
-    deps = [
-        ":co",
-    ],
-)
-
-cc_binary(
-    name = "costress",
-    srcs = ["costress.cc"],
-    deps = [
-        ":co",
-    ],
-)
-
-cc_test(
-    name = "test_coroutines",
-    srcs = [
-        "test_coroutines.cc",
-    ],
-    deps = [
-        ":co",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_test(
-    name = "coroutines_test",
-    srcs = [
-        "coroutines_test.cc",
-    ],
-    deps = [
-        ":co",
-        "@com_google_absl//absl/status:status_matchers",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
