@@ -1025,6 +1025,20 @@ void CoroutineScheduler::Run() {
         events.push_back(*list);
       }
     }
+    // Sort the events by the time they have been waiting.
+    std::sort(events.begin(), events.end(),
+              [this](const YieldedCoroutine &a, const YieldedCoroutine &b) {
+                if (a.fd == interrupt_fd_ || b.fd == interrupt_fd_) {
+                  // Interrupt fd always goes first.
+                  return true;
+                }
+                if (a.fd == co_interrupt_fd_ || b.fd == co_interrupt_fd_) {
+                  // Co interrupt fd always goes last.
+                  return false;
+                }
+                return a.co->LastTick() < b.co->LastTick();
+              });
+
 #else
     // Poll mode.
     BuildPollFds(&poll_state_);
@@ -1061,21 +1075,22 @@ void CoroutineScheduler::Run() {
         events.push_back(c);
       }
     }
-#endif
 
     // Sort the events by the time they have been waiting.
     std::sort(events.begin(), events.end(),
               [this](const YieldedCoroutine &a, const YieldedCoroutine &b) {
-                if (a.fd == interrupt_fd_ || b.fd == interrupt_fd_) {
+                if (a.fd == interrupt_fd_.fd || b.fd == interrupt_fd_.fd) {
                   // Interrupt fd always goes first.
                   return true;
                 }
-                if (a.fd == co_interrupt_fd_ || b.fd == co_interrupt_fd_) {
+                if (a.fd == co_interrupt_fd_.fd ||
+                    b.fd == co_interrupt_fd_.fd) {
                   // Co interrupt fd always goes last.
                   return false;
                 }
                 return a.co->LastTick() < b.co->LastTick();
               });
+#endif
 
     // Keep this out of a register.
     volatile int index = 0;
@@ -1106,19 +1121,24 @@ void CoroutineScheduler::Run() {
       }
       YieldedCoroutine *c = &events[index];
       index++;
-      if (c->fd == interrupt_fd_) {
-// Interrupt fd.
 #if CO_POLL_MODE == CO_POLL_EPOLL
+      if (c->fd == interrupt_fd_) {
         ClearEvent(interrupt_fd_);
-#else
-        ClearEvent(interrupt_fd_.fd);
-#endif
         continue;
       }
       if (c->fd == co_interrupt_fd_) {
         // Coroutine interrupt triggered, don't clear it.
         continue;
       }
+#else
+      if (c->fd == interrupt_fd_.fd) {
+        ClearEvent(interrupt_fd_.fd);
+        continue;
+      }
+      if (c->fd == co_interrupt_fd_.fd) {
+        continue;
+      }
+#endif
 
       if (c->co == nullptr) {
         // Shouldn't happen.
