@@ -1058,24 +1058,19 @@ void CoroutineScheduler::Run() {
     // Copy all triggered pollfds into the events vector.
     events.clear();
     events.reserve(num_ready);
+    constexpr size_t kNumReservedFds = 2;
     for (size_t i = 0; i < poll_state_.pollfds.size(); i++) {
       if (poll_state_.pollfds[i].fd > max_fd) {
         max_fd = poll_state_.pollfds[i].fd;
       }
       if (poll_state_.pollfds[i].revents != 0) {
-        if (i == 0) {
-          // Interrupt fd.
+        if (i < kNumReservedFds) {
+          // Interrupt fds.
           YieldedCoroutine c = {nullptr, poll_state_.pollfds[i].fd, 0};
           events.push_back(c);
           continue;
         }
-        if (i == 1) {
-          // Co interrupt fd.
-          YieldedCoroutine c = {nullptr, poll_state_.pollfds[i].fd, 0};
-          events.push_back(c);
-          continue;
-        }
-        YieldedCoroutine c = {poll_state_.coroutines[i - 1],
+        YieldedCoroutine c = {poll_state_.coroutines[i - kNumReservedFds],
                               poll_state_.pollfds[i].fd, 0};
         events.push_back(c);
       }
