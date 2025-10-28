@@ -172,7 +172,7 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
     : scheduler_(scheduler), function_(std::move(functor)),
-      interrupt_fd_(interrupt_fd), user_data_(user_data) {
+      interrupt_fd_(dup(interrupt_fd)), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name.empty()) {
     char buf[256];
