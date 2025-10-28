@@ -697,10 +697,10 @@ void Coroutine::YieldNonTemplate() const {
 }
 
 void Coroutine::InvokeFunction() {
+  function_(*this);
 #if defined(CO_ADDRESS_SANITIZER)
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
-  function_(*this);
 }
 
 // We use an intermediate function to do the invocation of
@@ -871,7 +871,7 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << "adding raw epoll fd " << fd << std::endl;
+    std::cerr << epoll_fd_ << " adding raw epoll fd " << fd << std::endl;
   }
   struct epoll_event event;
   memset(&event, 0, sizeof(event));
@@ -879,7 +879,8 @@ void CoroutineScheduler::AddEpollFd(int fd, uint32_t events) {
   event.data.fd = fd;
   int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &event);
   if (e == -1) {
-    std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+    std::cerr << epoll_fd_ << " epoll_ctl add failed: " << errno << ": "
+              << strerror(errno) << std::endl;
     abort();
   }
   num_epoll_events_++;
@@ -890,7 +891,8 @@ void CoroutineScheduler::AddEpollFd(YieldedCoroutine *c, uint32_t events) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << "adding coroutine epoll fd " << c->fd << std::endl;
+    std::cerr << epoll_fd_ << " adding coroutine epoll fd " << c->fd
+              << std::endl;
   }
   auto it = waiting_coroutines_.find(c->fd);
   if (it == waiting_coroutines_.end()) {
@@ -902,7 +904,8 @@ void CoroutineScheduler::AddEpollFd(YieldedCoroutine *c, uint32_t events) {
     event.data.fd = c->fd;
     int e = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, c->fd, &event);
     if (e == -1) {
-      std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      std::cerr << epoll_fd_ << " epoll_ctl add 2 failed: " << c->fd << " "
+                << errno << ": " << strerror(errno) << std::endl;
       abort();
     }
     num_epoll_events_++;
@@ -917,7 +920,8 @@ void CoroutineScheduler::RemoveEpollFd(YieldedCoroutine *c) {
     return;
   }
   if (kCoDebug) {
-    std::cerr << "removing coroutine epoll fd " << c->fd << std::endl;
+    std::cerr << epoll_fd_ << " removing coroutine epoll fd " << c->fd
+              << std::endl;
   }
   auto it = waiting_coroutines_.find(c->fd);
   if (it == waiting_coroutines_.end()) {
@@ -935,7 +939,8 @@ void CoroutineScheduler::RemoveEpollFd(YieldedCoroutine *c) {
     if (errno == EBADF) {
       // Ignore removing a file descriptor that doesn't exist.
     } else {
-      std::cerr << "epoll_ctl failed: " << strerror(errno) << std::endl;
+      std::cerr << epoll_fd_ << " epoll_ctl remove failed: " << c->fd << " "
+                << errno << ": " << strerror(errno) << std::endl;
       abort();
     }
   }
