@@ -59,9 +59,9 @@ add_library(co STATIC
     co/detect_sanitizers.h
 )
 
-# Headers are relative to the project root, so we add the co subdirectory.
+# Headers use "co/coroutine.h" style includes, so we add the project root.
 target_include_directories(co PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/co
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Link against Abseil dependencies

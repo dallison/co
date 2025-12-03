@@ -1,5 +1,5 @@
 #include "absl/status/status_matchers.h"
-#include "coroutine.h"
+#include "co/coroutine.h"
 #include <gtest/gtest.h>
 
 #define VAR(a) a##__COUNTER__
