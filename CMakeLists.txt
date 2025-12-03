@@ -51,17 +51,17 @@ FetchContent_MakeAvailable(googletest)
 # --- co Library Target ---
 # Corresponds to //:co in Bazel
 add_library(co STATIC
-    coroutine.cc
-    coroutine.h
-    bitset.h
-    context.S
-    context.h
-    detect_sanitizers.h
+    co/coroutine.cc
+    co/coroutine.h
+    co/bitset.h
+    co/context.S
+    co/context.h
+    co/detect_sanitizers.h
 )
 
-# Headers are relative to the project root, so we add the current source directory.
+# Headers are relative to the project root, so we add the co subdirectory.
 target_include_directories(co PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/co
 )
 
 # Link against Abseil dependencies
