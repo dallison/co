@@ -244,12 +244,13 @@ int main(int argc, char **argv) {
 
 
 ## Coroutine Lifecycle management
-The *CoroutineScheduler* object does not own the *Coroutine* instances.  The
-lifetime of the coroutines is managed by the program that's using the
-*CoroutineScheduler*.  This means that coroutines can be allocated anywhere
-and their lifecycle managed using techniques such as *std::unique_ptr*.
+Coroutines should exist beyond the lifetime of the code that creates them.
+Generally you allocate them on the heap (in a std::unique_ptr if you want to
+manage their lifetime automatically) and the are stored in some sort of data
+structure that exists alongside the scheduler.
 
-To aid in this, the *CoroutineScheduler* class has a way to register a function
+The old way of doing this is to keep them in a hash set in the same place
+as the scheduler and the *CoroutineScheduler* class has a way to register a function
 that will be called when a coroutine finishes.   For example, say you decide
 to hold you coroutines in a set of *std::unique_ptr* instances:
 
@@ -264,6 +265,16 @@ You can remove coroutines from this set when they complete using:
       [this](co::Coroutine *c) { coroutines_.erase(c); });
 ```
 
+The *new* way is to use the `CoroutineScheduler::Spawn` functions to create the 
+`Coroutine` instance on the heap and hold it as part of the scheduler itself:
+
+```c++
+scheduler.Spawn([]() {
+  // Body of coroutine.
+});
+```
+
+The scheduler owns any coroutines created this way and manages their lifecycle.
 
 ## Yielding and Generators
 If a coroutine has a long-running task to perform it should be nice to other
@@ -347,9 +358,9 @@ are not important to this discussion.  It also uses Google's *Abseil* library.
 
 
 ```c++
-void Server::ListenerCoroutine(UnixSocket listen_socket, co::Coroutine *c) {
+void Server::ListenerCoroutine(UnixSocket listen_socket) {
   for (;;) {
-    absl::Status status = HandleIncomingConnection(listen_socket, c);
+    absl::Status status = HandleIncomingConnection(listen_socket);
     if (!status.ok()) {
       fprintf(stderr, "Unable to make incoming connection: %s\n",
               status.ToString().c_str());
@@ -364,16 +375,10 @@ absl::Status Server::Run() {
     return status;
   }
 
-  // Register a callback to be called when a coroutine completes.  The
-  // server keeps track of all coroutines created for handling commands.
-  // This deletes them when they are done.
-  co_scheduler_.SetCompletionCallback(
-      [this](co::Coroutine *c) { coroutines_.erase(c); });
-
   // Start the listener coroutine.
-  co::Coroutine listener(co_scheduler_, [this, &listen_socket](co::Coroutine *c) {
-    ListenerCoroutine(std::move(listen_socket), c);
-  });
+  co_scheduler_.Spawn([this, &listen_socket]() {
+    ListenerCoroutine(std::move(listen_socket));
+  }
 
   // Other coroutines here...
 
@@ -389,9 +394,9 @@ for an incoming connection by calling *Accept* and then spawns a new coroutine
 to handle data on that connection.
 
 ```c++
-absl::Status Server::HandleIncomingConnection(UnixSocket &listen_socket,
-                                              co::Coroutine *c) {
-  absl::StatusOr<UnixSocket> s = listen_socket.Accept(c);
+absl::Status Server::HandleIncomingConnection(UnixSocket &listen_socket) {
+  // Pass the current coroutine to the Accept function of the socket.
+  absl::StatusOr<UnixSocket> s = listen_socket.Accept(co::self);
   if (!s.ok()) {
     return s.status();
   }
@@ -399,8 +404,9 @@ absl::Status Server::HandleIncomingConnection(UnixSocket &listen_socket,
       std::make_unique<ClientHandler>(this, std::move(*s)));
   ClientHandler *handler_ptr = client_handlers_.back().get();
 
-  coroutines_.insert(std::make_unique<co::Coroutine>(
-      co_scheduler_, [handler_ptr](co::Coroutine *c) { handler_ptr->Run(c); }));
+  co_scheduler_.Spawn([handle_ptr]() {
+    handler_ptr->Run();
+  });
 
   return absl::OkStatus();
 }
@@ -458,10 +464,12 @@ This has been tested on MacOS (Apple Silicon) and Linux (x86_64).  I haven't tri
 it on Windows but there's no reason why it shouldn't be capable of running, maybe
 after a few tweaks.
 
-It uses setjmp and longjmp to switch between the coroutines so that should be
-fairly portable.
+There is a custom context switcher implemented in assembly language that can be used
+on Linux or MacOS.
 
-There is some necessary assembly language magic involved in switching stacks and that
+If you don't like the custom switcher, you can use the lagacy setjmp and longjmp 
+context switcher so that should be fairly portable.  There is some necessary assembly l
+anguage magic involved in switching stacks and that
 supports ARM64 (Aarch64) and x86_64 only.  32-bit ports would be pretty easy and can
 be done if requested.
 
