@@ -2,8 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "coroutine.h"
-#include "detect_sanitizers.h"
+#include "co/coroutine.h"
+#include "co/detect_sanitizers.h"
 
 #include <stdlib.h>
 #include <string.h>
