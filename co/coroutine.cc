@@ -29,6 +29,13 @@
 #error "Unknown operating system"
 #endif
 
+#if __has_include(<valgrind/valgrind.h>)
+#include <valgrind/valgrind.h>
+#define CO_HAVE_VALGRIND 1
+#else
+#define CO_HAVE_VALGRIND 0
+#endif
+
 constexpr bool kCoDebug = false;
 
 #if CO_CTX_MODE == CO_CTX_SETJMP
@@ -66,6 +73,9 @@ constexpr bool kCoDebug = false;
 #endif
 
 namespace co {
+
+struct AbortException {};
+
 static int NewEventFd() {
   int event_fd;
 #if defined(__APPLE__)
@@ -151,12 +161,12 @@ asm(
 Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(
-          scheduler,
-          [functor = std::move(functor)](const Coroutine &c) {
-            functor(const_cast<Coroutine *>(&c));
-          },
-          std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
+    : Coroutine(scheduler,
+                [functor = std::move(functor)](const Coroutine &c) {
+                  functor(const_cast<Coroutine *>(&c));
+                },
+                std::move(name), interrupt_fd, autostart, stack_size,
+                user_data) {}
 
 Coroutine::Coroutine(CoroutineScheduler &scheduler,
                      std::function<void()> functor, std::string name,
@@ -200,6 +210,12 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
   CoroutineMakeContext(&resume_, func, this);
 #endif
 
+#if CO_HAVE_VALGRIND
+  // Inform Valgrind about the new stack.
+  valgrind_stack_id_ = VALGRIND_STACK_REGISTER(
+      stack_.data(), static_cast<char *>(stack_.data()) + stack_.size());
+#endif
+
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int efd = NewEventFd();
   if (efd == -1) {
@@ -233,6 +249,14 @@ Coroutine::~Coroutine() {
   CloseEventFd(yield_fd_.fd);
 #else
   CloseEventFd(event_fd_.fd);
+#endif
+  if (abort_fd_ != -1) {
+    CloseEventFd(abort_fd_);
+  }
+#if CO_HAVE_VALGRIND
+  if (valgrind_stack_id_ != -1) {
+    VALGRIND_STACK_DEREGISTER(valgrind_stack_id_);
+  }
 #endif
 }
 
@@ -349,10 +373,29 @@ static int MakeTimer(uint64_t ns) {
 #endif
 }
 
+static int MakeAbortEvent() {
+#if defined(__APPLE__)
+  // On MacOS we use a kqueue.
+  int kq = kqueue();
+  struct kevent e;
+
+  EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_ABSOLUTE, 0, 0);
+  kevent(kq, &e, 1, NULL, 0, NULL);
+  return kq;
+#elif defined(__linux__)
+  // On Linux we use an eventfd.
+  return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+#endif
+}
+
 int Coroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
     close(timer_fd);
+  }
+  if (wait_result_ == abort_fd_) {
+    abort_pending_ = true;
+    throw AbortException();
   }
   if (wait_result_ == timer_fd) {
     return -1;
@@ -373,6 +416,21 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
 #endif
   }
   return timer_fd;
+}
+
+void Coroutine::AddAbortFd() const {
+  if (!scheduler_.aborts_enabled__) {
+    return;
+  }
+  if (abort_fd_ == -1) {
+    abort_fd_ = MakeAbortEvent();
+  }
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  wait_fds_.push_back(YieldedCoroutine(this, abort_fd_, EPOLLIN));
+#else
+  struct pollfd abortfd = {.fd = abort_fd_, .events = POLLIN};
+  wait_fds_.push_back(abortfd);
+#endif
 }
 
 int Coroutine::Poll(const std::vector<int> &fds, short event_mask) const {
@@ -433,6 +491,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
   }
 #endif
 
+  AddAbortFd();
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -461,6 +520,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   }
 #endif
 
+  AddAbortFd();
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -496,6 +556,7 @@ int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
   if (interrupt_fd_ != -1) {
     wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
+  AddAbortFd();
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -530,6 +591,7 @@ int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
     wait_fds_.push_back(ifd);
   }
+  AddAbortFd();
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -549,6 +611,7 @@ int Coroutine::Wait(const std::vector<struct pollfd> &fds,
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
     wait_fds_.push_back(ifd);
   }
+  AddAbortFd();
   int timer_fd = AddTimeout(timeout_ns);
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
@@ -582,6 +645,9 @@ void Coroutine::Nanosleep(uint64_t ns) const {
   int timer = MakeTimer(ns);
   Wait(timer);
   close(timer);
+  if (abort_pending_) {
+    throw AbortException();
+  }
 }
 
 void Coroutine::TriggerEvent() const {
@@ -675,6 +741,9 @@ void Coroutine::Yield() const {
   // are not waiting for anything and there is no yield with timeout
   // since the coroutine is automatically rescheduled.  If you want to
   // sleep, use the various Sleep functions.
+  if (abort_pending_) {
+    throw AbortException();
+  }
 }
 
 void Coroutine::YieldToScheduler() const {
@@ -694,10 +763,17 @@ void Coroutine::YieldNonTemplate() const {
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 
   // We get here when resumed from another call.
+  if (abort_pending_) {
+    throw AbortException();
+  }
 }
 
 void Coroutine::InvokeFunction() {
-  function_(*this);
+  try {
+    function_(*this);
+  } catch (const AbortException &) {
+    // Coroutine was aborted, just exit.
+  }
 #if defined(CO_ADDRESS_SANITIZER)
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
@@ -714,14 +790,24 @@ void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 
 CO_DISABLE_ADDRESS_SANITIZER
 void Coroutine::Resume(int value) const {
+  if (aborted_) {
+    // Cannot resume an aborted coroutine.
+    SetState(State::kCoDead);
+    scheduler_.RemoveCoroutine(this);
+    SETCONTEXT(scheduler_.YieldCtx());
+    return;
+  }
+  if (abort_pending_) {
+    aborted_ = true;
+  }
   switch (state_) {
   case State::kCoReady:
-    // Initial invocation of the coroutine.  We need to do a bit
-    // of magic to switch to the coroutine's stack and invoke
-    // the function using the stack.  When the function returns
-    // we longjmp to the exit environment with the stack restored
-    // to the current one, which is the stack used by the
-    // CoroutineScheduler.
+// Initial invocation of the coroutine.  We need to do a bit
+// of magic to switch to the coroutine's stack and invoke
+// the function using the stack.  When the function returns
+// we longjmp to the exit environment with the stack restored
+// to the current one, which is the stack used by the
+// CoroutineScheduler.
 #if defined(CO_ADDRESS_SANITIZER)
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
                                    stack_.size());
@@ -734,7 +820,7 @@ void Coroutine::Resume(int value) const {
           reinterpret_cast<const char *>(stack_.data()) + stack_.size();
       jmp_buf &exit_state = exit_;
 
-      // clang-format off
+// clang-format off
 #if defined(__aarch64__)
       asm("mov x12, sp\n"     // Save current stack pointer.
           "mov x13, x29\n"    // Save current frame pointer
@@ -817,6 +903,14 @@ void Coroutine::Resume(int value) const {
     SETCONTEXT(exit_);
     break;
   }
+}
+
+void Coroutine::Abort() const {
+  abort_pending_ = true;
+  if (abort_fd_ == -1) {
+    return;
+  }
+  co::TriggerEvent(abort_fd_);
 }
 
 void Coroutine::GetAllFds(std::vector<int> &fds) const {
@@ -1264,7 +1358,14 @@ void CoroutineScheduler::TriggerInterrupt() const {
 }
 
 void CoroutineScheduler::Stop() {
-  running_ = false;
+  if (aborts_enabled__) {
+    // Abort all coroutines.
+    for (auto *c : coroutines_) {
+      c->Abort();
+    }
+  } else {
+    running_ = false;
+  }
 #if CO_POLL_MODE == CO_POLL_EPOLL
   TriggerEvent(interrupt_fd_);
 #else
