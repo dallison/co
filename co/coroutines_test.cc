@@ -380,7 +380,7 @@ TEST(CoroutinesTest, AbortSingle) {
   });
 
   // Abort the other coroutine which is stored in 'c'.
-  scheduler.Spawn([&scheduler, &c]() {
+  scheduler.Spawn([&c]() {
     co::Sleep(std::chrono::milliseconds(100));
     c->Abort();
   });
