@@ -102,6 +102,13 @@
 
 #include <poll.h>
 
+#if __has_include(<valgrind/valgrind.h>)
+#define CO_HAVE_VALGRIND 1
+#else
+#define CO_HAVE_VALGRIND 0
+#endif
+
+
 // Uncomment this if you want to see which context switcher is being used.
 // This is useful for debugging and understanding which context switcher
 // is being used in your code.  It will print a message at compile time

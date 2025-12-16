@@ -29,11 +29,8 @@
 #error "Unknown operating system"
 #endif
 
-#if __has_include(<valgrind/valgrind.h>)
+#if CO_HAVE_VALGRIND
 #include <valgrind/valgrind.h>
-#define CO_HAVE_VALGRIND 1
-#else
-#define CO_HAVE_VALGRIND 0
 #endif
 
 constexpr bool kCoDebug = false;
