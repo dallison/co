@@ -63,7 +63,7 @@ cc_test(
     ],
     deps = [
         ":co",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -75,6 +75,6 @@ cc_test(
     deps = [
         ":co",
         "@abseil-cpp//absl/status:status_matchers",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest_main",
     ],
 )
