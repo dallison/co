@@ -102,6 +102,13 @@
 
 #include <poll.h>
 
+#if __has_include(<valgrind/valgrind.h>)
+#define CO_HAVE_VALGRIND 1
+#else
+#define CO_HAVE_VALGRIND 0
+#endif
+
+
 // Uncomment this if you want to see which context switcher is being used.
 // This is useful for debugging and understanding which context switcher
 // is being used in your code.  It will print a message at compile time
@@ -409,6 +416,14 @@ public:
                   .count());
   }
 
+  // Abort the coroutine.  It will cause the current wait or sleep to throw an
+  // internal exception which will unwind the stack.  It will also set the
+  // aborted flag which can be checked inside the coroutine function.
+  void Abort() const;
+
+  // Has this coroutine been aborted?
+  bool IsAborted() const { return aborted_; }
+
   // Set and get the name.  You can change the name at any time.  It's
   // only for debug really.
   void SetName(const std::string &name) { name_ = name; }
@@ -443,9 +458,7 @@ public:
 
   int GetInterruptFd() const { return interrupt_fd_; }
 
-  size_t GetStackSize() const {
-    return stack_.size();
-  }
+  size_t GetStackSize() const { return stack_.size(); }
 
 protected:
   enum class State {
@@ -466,6 +479,8 @@ protected:
   void InvokeFunction();
   int EndOfWait(int timer_fd) const;
   int AddTimeout(uint64_t timeout_ns) const;
+  void AddAbortFd() const;
+
   State GetState() const { return state_; }
 #if CO_POLL_MODE == CO_POLL_POLL
   void AddPollFds(std::vector<struct pollfd> &pollfds,
@@ -493,6 +508,16 @@ protected:
   mutable int wait_result_;
   mutable bool first_resume_ = true;
 
+  // Abort handling.  If the scheduler has been configured to abort coroutines on stop.
+  // we allocate an abort fd.
+  //
+  // Aborting a coroutine causes it to correctly terminate its execution function, unwinding
+  // the stack and calling destructors.  It is a clean way to terminate a coroutine without
+  // having to use an interrupt fd and check for termination in the coroutine function.
+  mutable int abort_fd_ = -1;
+  mutable bool abort_pending_ = false;    // Coroutine::Abort called.
+  mutable bool aborted_ = false;      // Abort has been processed.
+
 #if CO_POLL_MODE == CO_POLL_EPOLL
   mutable YieldedCoroutine yield_fd_;
   mutable std::vector<YieldedCoroutine> wait_fds_;
@@ -509,6 +534,9 @@ protected:
 
   // Function used to create a string for this coroutine.
   std::function<std::string()> to_string_callback_;
+#if CO_HAVE_VALGRIND
+  int valgrind_stack_id_ = -1;
+#endif
 };
 
 // A Generator is a coroutine that generates values.  The magic lamda line
@@ -522,23 +550,23 @@ public:
   Generator(CoroutineScheduler &scheduler, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(
-            scheduler,
-            [function = std::move(function)](const Coroutine &c) {
-              function(reinterpret_cast<Generator<T> *>(
-                  const_cast<Coroutine *>(&c)));
-            },
-            name, interrupt_fd, /*autostart=*/false, stack_size, user_data) {}
+      : Coroutine(scheduler,
+                  [function = std::move(function)](const Coroutine &c) {
+                    function(reinterpret_cast<Generator<T> *>(
+                        const_cast<Coroutine *>(&c)));
+                  },
+                  name, interrupt_fd, /*autostart=*/false, stack_size,
+                  user_data) {}
 
   Generator(CoroutineScheduler &scheduler, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(
-            scheduler,
-            [this](const Coroutine &c) {
-              gen_function_(reinterpret_cast<const Generator<T> &>(c));
-            },
-            name, interrupt_fd, /*autostart=*/false, stack_size, user_data),
+      : Coroutine(scheduler,
+                  [this](const Coroutine &c) {
+                    gen_function_(reinterpret_cast<const Generator<T> &>(c));
+                  },
+                  name, interrupt_fd, /*autostart=*/false, stack_size,
+                  user_data),
         gen_function_(function) {}
 
   // Yield control and store value.
@@ -583,6 +611,11 @@ public:
 
   void TriggerInterrupt() const;
 
+  // Enable the abort functionality for coroutines.  When enabled, you
+  // can call Abort on a coroutine and the scheduler will abort all running
+  // coroutines when it is stoppe.d
+  void EnableAborts(bool enabled = true) { aborts_enabled__ = enabled; }
+
 #if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
   // functions allow you to incorporate the multiplexed
@@ -601,11 +634,12 @@ public:
 
   // Subclass can override this to provide custom behavior on coroutine
   // resumption.
-  virtual void OnResume(const Coroutine* c) {}
+  virtual void OnResume(const Coroutine *c) {}
 
   int GetEpollFd() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-    return epoll_fd_;;
+    return epoll_fd_;
+    ;
 #else
     return -1;
 #endif
@@ -621,10 +655,7 @@ public:
                        CoroutineOptions opts = {});
   co::Coroutine *Spawn(std::function<void()> f, CoroutineOptions opts = {});
 
-  bool IsRunning() const {
-    return running_;
-  }
-
+  bool IsRunning() const { return running_; }
 
 protected:
   friend class Coroutine;
@@ -670,6 +701,7 @@ protected:
 #if defined(CO_ADDRESS_SANITIZER)
   void *fake_stack_ = nullptr;
 #endif
+  std::atomic<bool> aborts_enabled__ = true;
 };
 
 template <typename T>
