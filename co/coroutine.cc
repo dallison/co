@@ -30,6 +30,7 @@
 #if CO_TIMER_MODE == CO_TIMER_POSIX
 #include <signal.h>
 #include <time.h>
+#include <limits.h>  // For PIPE_BUF
 #endif
 
 #if CO_HAVE_VALGRIND
@@ -386,6 +387,23 @@ int MakeTimer(CoroutineScheduler &scheduler, const Coroutine *coroutine, uint64_
   fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
   flags = fcntl(write_fd, F_GETFL, 0);
   fcntl(write_fd, F_SETFL, flags | O_NONBLOCK);
+  
+  // Set pipe buffer size to minimum possible
+  // On systems that support F_SETPIPE_SZ (Linux, QNX), try to set to smallest size
+  // The minimum is typically one page (4096 bytes) or PIPE_BUF, whichever is smaller
+#ifdef F_SETPIPE_SZ
+  // Try to set to the smallest reasonable value (one page = 4096 bytes)
+  // This is typically the minimum pipe buffer size on most systems
+  long min_buffer_size = 4096;
+  if (fcntl(read_fd, F_SETPIPE_SZ, min_buffer_size) != -1) {
+    fcntl(write_fd, F_SETPIPE_SZ, min_buffer_size);
+  } else {
+    // Fallback to PIPE_BUF if 4096 fails
+    if (fcntl(read_fd, F_SETPIPE_SZ, PIPE_BUF) != -1) {
+      fcntl(write_fd, F_SETPIPE_SZ, PIPE_BUF);
+    }
+  }
+#endif
   
   // Store write_fd in the coroutine (mutable member, so const_cast is safe)
   coroutine->posix_timer_write_fd_ = write_fd;
