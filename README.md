@@ -460,18 +460,42 @@ will tell you what it is.
 ```
 
 # Portability
-This has been tested on MacOS (Apple Silicon) and Linux (x86_64).  I haven't tried
+This has been tested on MacOS (Apple Silicon), Linux (x86_64), and QNX.  I haven't tried
 it on Windows but there's no reason why it shouldn't be capable of running, maybe
 after a few tweaks.
 
 There is a custom context switcher implemented in assembly language that can be used
-on Linux or MacOS.
+on Linux, MacOS, and QNX for x86_64 and ARM64 (Aarch64) architectures.
 
 If you don't like the custom switcher, you can use the lagacy setjmp and longjmp 
 context switcher so that should be fairly portable.  There is some necessary assembly l
 anguage magic involved in switching stacks and that
 supports ARM64 (Aarch64) and x86_64 only.  32-bit ports would be pretty easy and can
 be done if requested.
+
+## Timer Implementations
+
+The library supports three different timer implementations, selected automatically based on the operating system:
+
+1. **Linux timerfd** (`CO_TIMER_TIMERFD`): Uses Linux-specific `timerfd_create()` system call. This is the default on Linux and provides the best performance.
+
+2. **macOS kqueue** (`CO_TIMER_EVENT`): Uses macOS's kqueue event mechanism. This is the default on macOS.
+
+3. **POSIX timers** (`CO_TIMER_POSIX`): Uses portable POSIX `timer_create()` API with a pipe for notification. This is the default on QNX and other POSIX-compliant systems that don't have timerfd or kqueue. The timer writes to a pipe when it expires, and the read end of the pipe is monitored by poll/epoll.
+
+You can override the default timer implementation by modifying the `CO_TIMER_MODE` macro in `coroutine.h`. For example, to use POSIX timers on Linux instead of timerfd, change:
+
+```cpp
+#define CO_TIMER_MODE CO_TIMER_TIMERFD
+```
+
+to:
+
+```cpp
+#define CO_TIMER_MODE CO_TIMER_POSIX
+```
+
+The POSIX timer implementation creates a pipe and uses `timer_create()` with `SIGEV_THREAD` notification. When the timer expires, a thread callback writes to the pipe, making the read end ready for polling. This approach is portable across all POSIX-compliant systems including QNX.
 
 # Example code
 I've provided two example programs for your enjoyment:
