@@ -254,6 +254,9 @@ Coroutine::~Coroutine() {
   if (abort_fd_ != -1) {
     CloseEventFd(abort_fd_);
   }
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  CleanupPosixTimer();
+#endif
 #if CO_HAVE_VALGRIND
   if (valgrind_stack_id_ != -1) {
     VALGRIND_STACK_DEREGISTER(valgrind_stack_id_);
@@ -1084,22 +1087,6 @@ CoroutineScheduler::~CoroutineScheduler() {
   close(interrupt_fd_);
 #else
   CloseEventFd(interrupt_fd_.fd);
-#endif
-
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-  // Clean up any remaining POSIX timers in coroutines
-  // Each coroutine manages its own timer, so we iterate through coroutines
-  for (auto *coroutine : coroutines_) {
-    if (coroutine && coroutine->posix_timer_id_ != nullptr) {
-      coroutine->CleanupPosixTimer();
-    }
-  }
-  // Also check owned coroutines
-  for (const auto &coroutine : owned_coroutines_) {
-    if (coroutine && coroutine->posix_timer_id_ != nullptr) {
-      coroutine->CleanupPosixTimer();
-    }
-  }
 #endif
 }
 
