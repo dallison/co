@@ -45,6 +45,14 @@
 #define CO_POLL_EPOLL 1
 #define CO_POLL_POLL 2
 
+// Timer implementation selection:
+// 1. CO_TIMER_TIMERFD - Linux timerfd (Linux only)
+// 2. CO_TIMER_EVENT - macOS kqueue event (macOS only)
+// 3. CO_TIMER_POSIX - POSIX timer_create with pipe (portable)
+#define CO_TIMER_TIMERFD 1
+#define CO_TIMER_EVENT 2
+#define CO_TIMER_POSIX 3
+
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -70,6 +78,7 @@
 #define CO_CTX_MODE CO_CTX_SETJMP
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
+#define CO_TIMER_MODE CO_TIMER_EVENT
 #include <csetjmp>
 
 #elif defined(__linux__)
@@ -86,6 +95,19 @@
 #include <sys/epoll.h>
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
+#define CO_TIMER_MODE CO_TIMER_TIMERFD // Change this line to use POSIX timer instead
+
+#elif defined(__QNX__) || defined(__QNXNTO__)
+// QNX configuration
+#if defined(__x86_64__) || defined(__aarch64__)
+// On QNX, use custom context switcher if available for the architecture.
+#define CO_CTX_MODE CO_CTX_CUSTOM
+#else
+// Custom context switcher is not available for this architecture.  Use setjmp/longjmp.
+#define CO_CTX_MODE CO_CTX_SETJMP
+#endif
+#define CO_POLL_MODE CO_POLL_POLL
+#define CO_TIMER_MODE CO_TIMER_POSIX
 #else
 // Other OS, use the custom context switcher if available
 // or setjmp/longjmp if not.  The custom context switcher is only available
@@ -98,6 +120,7 @@
 
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
+#define CO_TIMER_MODE CO_TIMER_POSIX // Use POSIX timer for other OSes
 #endif
 
 #include <poll.h>
@@ -150,6 +173,10 @@ using Context = co::CoroutineContext;
 #include <set>
 #include <string>
 #include <vector>
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+#include <time.h>  // For timer_t
+#endif
 
 #include "bitset.h"
 #include "detect_sanitizers.h"
@@ -474,12 +501,16 @@ protected:
   template <typename T> friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
+  friend int MakeTimer(const Coroutine *coroutine, uint64_t ns);
   static const char *StateName(State state);
 
   void InvokeFunction();
   int EndOfWait(int timer_fd) const;
   int AddTimeout(uint64_t timeout_ns) const;
   void AddAbortFd() const;
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  void CleanupPosixTimer() const;
+#endif
 
   State GetState() const { return state_; }
 #if CO_POLL_MODE == CO_POLL_POLL
@@ -531,6 +562,12 @@ protected:
       nullptr;                     // If being called, who is calling us.
   void *user_data_;                // User data, not owned by this.
   mutable uint64_t last_tick_ = 0; // Tick count of last resume.
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  mutable int posix_timer_write_fd_ = -1; // Write end of pipe for POSIX timer
+  mutable timer_t posix_timer_id_ = nullptr; // POSIX timer ID
+  mutable int posix_timer_read_fd_ = -1; // Read end of pipe (timer fd)
+#endif
 
   // Function used to create a string for this coroutine.
   std::function<std::string()> to_string_callback_;
@@ -660,6 +697,7 @@ public:
 protected:
   friend class Coroutine;
   template <typename T> friend class Generator;
+  friend int MakeTimer(const Coroutine *coroutine, uint64_t ns);
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void AddEpollFd(int fd, uint32_t events);

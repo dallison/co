@@ -25,8 +25,12 @@
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
 
-#else
-#error "Unknown operating system"
+#endif
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+#include <signal.h>
+#include <time.h>
+#include <limits.h>  // For PIPE_BUF
 #endif
 
 #if CO_HAVE_VALGRIND
@@ -250,6 +254,9 @@ Coroutine::~Coroutine() {
   if (abort_fd_ != -1) {
     CloseEventFd(abort_fd_);
   }
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  CleanupPosixTimer();
+#endif
 #if CO_HAVE_VALGRIND
   if (valgrind_stack_id_ != -1) {
     VALGRIND_STACK_DEREGISTER(valgrind_stack_id_);
@@ -338,16 +345,17 @@ void Coroutine::Start() {
   }
 }
 
-static int MakeTimer(uint64_t ns) {
-#if defined(__APPLE__)
-  // On MacOS we use a kqueue.
+
+int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
+#if CO_TIMER_MODE == CO_TIMER_EVENT
+  // macOS uses a kqueue.
   int kq = kqueue();
   struct kevent e;
 
   EV_SET(&e, 1, EVFILT_TIMER, EV_ADD, NOTE_NSECONDS, ns, 0);
   kevent(kq, &e, 1, NULL, 0, NULL);
   return kq;
-#elif defined(__linux__)
+#elif CO_TIMER_MODE == CO_TIMER_TIMERFD
   // Linux uses a timerfd.
   struct itimerspec new_value;
   struct timespec now;
@@ -367,6 +375,86 @@ static int MakeTimer(uint64_t ns) {
   int fd = timerfd_create(CLOCK_REALTIME, 0);
   timerfd_settime(fd, TFD_TIMER_ABSTIME, &new_value, NULL);
   return fd;
+#elif CO_TIMER_MODE == CO_TIMER_POSIX
+  // POSIX timer_create with pipe
+  int pipe_fds[2];
+  if (pipe(pipe_fds) == -1) {
+    return -1;
+  }
+  
+  int read_fd = pipe_fds[0];
+  int write_fd = pipe_fds[1];
+  
+  // Set pipe to non-blocking
+  int flags = fcntl(read_fd, F_GETFL, 0);
+  fcntl(read_fd, F_SETFL, flags | O_NONBLOCK);
+  flags = fcntl(write_fd, F_GETFL, 0);
+  fcntl(write_fd, F_SETFL, flags | O_NONBLOCK);
+  
+  // Set pipe buffer size to minimum possible
+  // On systems that support F_SETPIPE_SZ (Linux, QNX), try to set to smallest size
+  // The minimum is typically one page (4096 bytes) or PIPE_BUF, whichever is smaller
+#ifdef F_SETPIPE_SZ
+  // Try to set to the smallest reasonable value (one page = 4096 bytes)
+  // This is typically the minimum pipe buffer size on most systems
+  long min_buffer_size = 4096;
+  if (fcntl(read_fd, F_SETPIPE_SZ, min_buffer_size) != -1) {
+    fcntl(write_fd, F_SETPIPE_SZ, min_buffer_size);
+  } else {
+    // Fallback to PIPE_BUF if 4096 fails
+    if (fcntl(read_fd, F_SETPIPE_SZ, PIPE_BUF) != -1) {
+      fcntl(write_fd, F_SETPIPE_SZ, PIPE_BUF);
+    }
+  }
+#endif
+    
+  // Create a POSIX timer with SIGEV_THREAD notification
+  // The thread function will write to the pipe when timer expires
+  struct sigevent se;
+  se.sigev_notify = SIGEV_THREAD;
+  se.sigev_notify_function = [](union sigval sv) {
+    const Coroutine *coroutine = static_cast<const Coroutine*>(sv.sival_ptr);
+    if (coroutine && coroutine->posix_timer_write_fd_ != -1) {
+      // Write to pipe to signal timer expiration
+      // Ignore errors - pipe may have been closed by cleanup
+      // posix_timer_write_fd_ is mutable so we can access it through const pointer
+      char c = 1;
+      write(coroutine->posix_timer_write_fd_, &c, 1);
+    }
+  };
+  se.sigev_notify_attributes = nullptr;
+  se.sigev_value.sival_ptr = const_cast<void*>(static_cast<const void*>(coroutine));  // void* doesn't preserve const, but lambda casts back to const
+  
+  timer_t timer_id;
+  if (timer_create(CLOCK_REALTIME, &se, &timer_id) == -1) {
+    close(read_fd);
+    close(write_fd);
+    return -1;
+  }
+  
+  // Set up the timer to expire after ns nanoseconds
+  struct itimerspec its;
+  constexpr uint64_t kBillion = 1000000000LL;
+  its.it_value.tv_sec = ns / kBillion;
+  its.it_value.tv_nsec = ns % kBillion;
+  its.it_interval.tv_sec = 0;
+  its.it_interval.tv_nsec = 0;
+  
+  if (timer_settime(timer_id, 0, &its, nullptr) == -1) {
+    timer_delete(timer_id);
+    close(read_fd);
+    close(write_fd);
+    return -1;
+  }
+  
+  // Store timer resources directly in the coroutine
+  coroutine->posix_timer_id_ = timer_id;
+  coroutine->posix_timer_read_fd_ = read_fd;
+  coroutine->posix_timer_write_fd_ = write_fd;
+ 
+  return read_fd;
+#else
+#error "Unknown timer mode"
 #endif
 }
 
@@ -388,7 +476,15 @@ static int MakeAbortEvent() {
 int Coroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+    if (timer_fd == posix_timer_read_fd_) {
+      CleanupPosixTimer();
+    } else {
+      close(timer_fd);
+    }
+#else
     close(timer_fd);
+#endif
   }
   if (wait_result_ == abort_fd_) {
     abort_pending_ = true;
@@ -404,7 +500,7 @@ int Coroutine::EndOfWait(int timer_fd) const {
 int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   int timer_fd = -1;
   if (timeout_ns > 0) {
-    timer_fd = MakeTimer(timeout_ns);
+    timer_fd = MakeTimer(this, timeout_ns);
 #if CO_POLL_MODE == CO_POLL_EPOLL
     wait_fds_.push_back(YieldedCoroutine(this, timer_fd, EPOLLIN));
 #else
@@ -639,13 +735,47 @@ int Coroutine::PollAndWait(const std::vector<struct pollfd> &fds,
 #endif
 
 void Coroutine::Nanosleep(uint64_t ns) const {
-  int timer = MakeTimer(ns);
+  int timer = MakeTimer(this, ns);
   Wait(timer);
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  CleanupPosixTimer();
+#else
   close(timer);
+#endif
   if (abort_pending_) {
     throw AbortException();
   }
 }
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+
+void Coroutine::CleanupPosixTimer() const {
+  // This needs to be idempotent as it is called in the destructor and might have already
+  // been called after a Wait has finished.
+  if (posix_timer_id_ != nullptr) {
+    // Disarm the timer first
+    struct itimerspec its;
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+    timer_settime(posix_timer_id_, 0, &its, nullptr);
+    timer_delete(posix_timer_id_);
+    posix_timer_id_ = nullptr;
+  }
+  
+  if (posix_timer_write_fd_ != -1) {
+    close(posix_timer_write_fd_);
+    posix_timer_write_fd_ = -1;
+  }
+  
+  if (posix_timer_read_fd_ != -1) {
+    close(posix_timer_read_fd_);
+    posix_timer_read_fd_ = -1;
+  }
+}
+
+#endif
 
 void Coroutine::TriggerEvent() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -954,6 +1084,7 @@ CoroutineScheduler::~CoroutineScheduler() {
   CloseEventFd(interrupt_fd_.fd);
 #endif
 }
+
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 
