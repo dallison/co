@@ -407,10 +407,7 @@ int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
     }
   }
 #endif
-  
-  // Store write_fd in the coroutine (mutable member, so const_cast is safe)
-  coroutine->posix_timer_write_fd_ = write_fd;
-  
+    
   // Create a POSIX timer with SIGEV_THREAD notification
   // The thread function will write to the pipe when timer expires
   struct sigevent se;
@@ -430,7 +427,6 @@ int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
   
   timer_t timer_id;
   if (timer_create(CLOCK_REALTIME, &se, &timer_id) == -1) {
-    const_cast<Coroutine*>(coroutine)->posix_timer_write_fd_ = -1;
     close(read_fd);
     close(write_fd);
     return -1;
@@ -446,7 +442,6 @@ int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
   
   if (timer_settime(timer_id, 0, &its, nullptr) == -1) {
     timer_delete(timer_id);
-    const_cast<Coroutine*>(coroutine)->posix_timer_write_fd_ = -1;
     close(read_fd);
     close(write_fd);
     return -1;
@@ -455,7 +450,8 @@ int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
   // Store timer resources directly in the coroutine
   coroutine->posix_timer_id_ = timer_id;
   coroutine->posix_timer_read_fd_ = read_fd;
-  
+  coroutine->posix_timer_write_fd_ = write_fd;
+ 
   return read_fd;
 #else
 #error "Unknown timer mode"
@@ -754,7 +750,8 @@ void Coroutine::Nanosleep(uint64_t ns) const {
 #if CO_TIMER_MODE == CO_TIMER_POSIX
 
 void Coroutine::CleanupPosixTimer() const {
-  // Cancel and delete the timer (this prevents the callback from running)
+  // This needs to be idempotent as it is called in the destructor and might have already
+  // been called after a Wait has finished.
   if (posix_timer_id_ != nullptr) {
     // Disarm the timer first
     struct itimerspec its;
@@ -767,13 +764,11 @@ void Coroutine::CleanupPosixTimer() const {
     posix_timer_id_ = nullptr;
   }
   
-  // Reset write_fd to prevent callback from using it
   if (posix_timer_write_fd_ != -1) {
     close(posix_timer_write_fd_);
     posix_timer_write_fd_ = -1;
   }
   
-  // Close read end of pipe (the timer_fd)
   if (posix_timer_read_fd_ != -1) {
     close(posix_timer_read_fd_);
     posix_timer_read_fd_ = -1;
