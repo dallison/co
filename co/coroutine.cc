@@ -343,7 +343,7 @@ void Coroutine::Start() {
 }
 
 
-int MakeTimer(CoroutineScheduler &scheduler, const Coroutine *coroutine, uint64_t ns) {
+int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
 #if CO_TIMER_MODE == CO_TIMER_EVENT
   // macOS uses a kqueue.
   int kq = kqueue();
@@ -449,8 +449,9 @@ int MakeTimer(CoroutineScheduler &scheduler, const Coroutine *coroutine, uint64_
     return -1;
   }
   
-  // Store timer resources for cleanup
-  scheduler.AddPosixTimer(read_fd, timer_id, write_fd, const_cast<Coroutine*>(coroutine));
+  // Store timer resources directly in the coroutine
+  coroutine->posix_timer_id_ = timer_id;
+  coroutine->posix_timer_read_fd_ = read_fd;
   
   return read_fd;
 #else
@@ -477,7 +478,11 @@ int Coroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
 #if CO_TIMER_MODE == CO_TIMER_POSIX
-    scheduler_.CleanupPosixTimer(timer_fd);
+    if (timer_fd == posix_timer_read_fd_) {
+      CleanupPosixTimer();
+    } else {
+      close(timer_fd);
+    }
 #else
     close(timer_fd);
 #endif
@@ -496,7 +501,7 @@ int Coroutine::EndOfWait(int timer_fd) const {
 int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   int timer_fd = -1;
   if (timeout_ns > 0) {
-    timer_fd = MakeTimer(scheduler_, this, timeout_ns);
+    timer_fd = MakeTimer(this, timeout_ns);
 #if CO_POLL_MODE == CO_POLL_EPOLL
     wait_fds_.push_back(YieldedCoroutine(this, timer_fd, EPOLLIN));
 #else
@@ -731,10 +736,10 @@ int Coroutine::PollAndWait(const std::vector<struct pollfd> &fds,
 #endif
 
 void Coroutine::Nanosleep(uint64_t ns) const {
-  int timer = MakeTimer(scheduler_, this, ns);
+  int timer = MakeTimer(this, ns);
   Wait(timer);
 #if CO_TIMER_MODE == CO_TIMER_POSIX
-  scheduler_.CleanupPosixTimer(timer);
+  CleanupPosixTimer();
 #else
   close(timer);
 #endif
@@ -742,6 +747,37 @@ void Coroutine::Nanosleep(uint64_t ns) const {
     throw AbortException();
   }
 }
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+
+void Coroutine::CleanupPosixTimer() const {
+  // Cancel and delete the timer (this prevents the callback from running)
+  if (posix_timer_id_ != nullptr) {
+    // Disarm the timer first
+    struct itimerspec its;
+    its.it_value.tv_sec = 0;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 0;
+    its.it_interval.tv_nsec = 0;
+    timer_settime(posix_timer_id_, 0, &its, nullptr);
+    timer_delete(posix_timer_id_);
+    posix_timer_id_ = nullptr;
+  }
+  
+  // Reset write_fd to prevent callback from using it
+  if (posix_timer_write_fd_ != -1) {
+    close(posix_timer_write_fd_);
+    posix_timer_write_fd_ = -1;
+  }
+  
+  // Close read end of pipe (the timer_fd)
+  if (posix_timer_read_fd_ != -1) {
+    close(posix_timer_read_fd_);
+    posix_timer_read_fd_ = -1;
+  }
+}
+
+#endif
 
 void Coroutine::TriggerEvent() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -1051,78 +1087,22 @@ CoroutineScheduler::~CoroutineScheduler() {
 #endif
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
-  // Clean up any remaining POSIX timers
-  for (auto &pair : posix_timer_map_) {
-    CoroutineScheduler::PosixTimerResource &res = pair.second;
-    if (res.timer_id != nullptr) {
-      struct itimerspec its;
-      its.it_value.tv_sec = 0;
-      its.it_value.tv_nsec = 0;
-      its.it_interval.tv_sec = 0;
-      its.it_interval.tv_nsec = 0;
-      timer_settime(res.timer_id, 0, &its, nullptr);
-      timer_delete(res.timer_id);
+  // Clean up any remaining POSIX timers in coroutines
+  // Each coroutine manages its own timer, so we iterate through coroutines
+  for (auto *coroutine : coroutines_) {
+    if (coroutine && coroutine->posix_timer_id_ != nullptr) {
+      coroutine->CleanupPosixTimer();
     }
-    // Reset coroutine's write_fd
-    if (res.coroutine != nullptr) {
-      res.coroutine->posix_timer_write_fd_ = -1;
-    }
-    if (res.write_pipe_fd != -1) {
-      close(res.write_pipe_fd);
-    }
-    close(pair.first);  // Close read end of pipe
   }
-  posix_timer_map_.clear();
+  // Also check owned coroutines
+  for (const auto &coroutine : owned_coroutines_) {
+    if (coroutine && coroutine->posix_timer_id_ != nullptr) {
+      coroutine->CleanupPosixTimer();
+    }
+  }
 #endif
 }
 
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-
-void CoroutineScheduler::AddPosixTimer(int read_pipe_fd, timer_t timer_id,
-                                        int write_pipe_fd, Coroutine *coroutine) {
-  PosixTimerResource res;
-  res.timer_id = timer_id;
-  res.write_pipe_fd = write_pipe_fd;
-  res.coroutine = coroutine;
-  posix_timer_map_[read_pipe_fd] = res;
-}
-
-void CoroutineScheduler::CleanupPosixTimer(int read_pipe_fd) {
-  auto it = posix_timer_map_.find(read_pipe_fd);
-  if (it != posix_timer_map_.end()) {
-    PosixTimerResource &res = it->second;
-    
-    // Cancel and delete the timer (this prevents the callback from running)
-    if (res.timer_id != nullptr) {
-      // Disarm the timer first
-      struct itimerspec its;
-      its.it_value.tv_sec = 0;
-      its.it_value.tv_nsec = 0;
-      its.it_interval.tv_sec = 0;
-      its.it_interval.tv_nsec = 0;
-      timer_settime(res.timer_id, 0, &its, nullptr);
-      timer_delete(res.timer_id);
-    }
-    
-    // Reset coroutine's write_fd to prevent callback from using it
-    if (res.coroutine != nullptr) {
-      res.coroutine->posix_timer_write_fd_ = -1;
-    }
-    
-    // Close write end of pipe
-    if (res.write_pipe_fd != -1) {
-      close(res.write_pipe_fd);
-    }
-    
-    // Remove from map
-    posix_timer_map_.erase(it);
-  }
-  
-  // Close read end of pipe (the timer_fd)
-  close(read_pipe_fd);
-}
-
-#endif
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 

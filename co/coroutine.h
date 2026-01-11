@@ -501,13 +501,16 @@ protected:
   template <typename T> friend class Generator;
 
   friend void __co_Invoke(Coroutine *c);
-  friend int MakeTimer(CoroutineScheduler &scheduler, const Coroutine *coroutine, uint64_t ns);
+  friend int MakeTimer(const Coroutine *coroutine, uint64_t ns);
   static const char *StateName(State state);
 
   void InvokeFunction();
   int EndOfWait(int timer_fd) const;
   int AddTimeout(uint64_t timeout_ns) const;
   void AddAbortFd() const;
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  void CleanupPosixTimer() const;
+#endif
 
   State GetState() const { return state_; }
 #if CO_POLL_MODE == CO_POLL_POLL
@@ -562,6 +565,8 @@ protected:
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   mutable int posix_timer_write_fd_ = -1; // Write end of pipe for POSIX timer
+  mutable timer_t posix_timer_id_ = nullptr; // POSIX timer ID
+  mutable int posix_timer_read_fd_ = -1; // Read end of pipe (timer fd)
 #endif
 
   // Function used to create a string for this coroutine.
@@ -692,7 +697,7 @@ public:
 protected:
   friend class Coroutine;
   template <typename T> friend class Generator;
-  friend int MakeTimer(CoroutineScheduler &scheduler, const Coroutine *coroutine, uint64_t ns);
+  friend int MakeTimer(const Coroutine *coroutine, uint64_t ns);
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void AddEpollFd(int fd, uint32_t events);
@@ -700,10 +705,6 @@ protected:
   void RemoveEpollFd(YieldedCoroutine *cfd);
 #else
   void BuildPollFds(PollState *poll_state);
-#endif
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-  void AddPosixTimer(int read_pipe_fd, timer_t timer_id, int write_pipe_fd, Coroutine *coroutine);
-  void CleanupPosixTimer(int read_pipe_fd);
 #endif
   uint32_t AllocateId();
   uint64_t TickCount() const { return tick_count_; }
@@ -739,20 +740,6 @@ protected:
   void *fake_stack_ = nullptr;
 #endif
   std::atomic<bool> aborts_enabled__ = true;
-
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-  // Structure to track POSIX timer resources (timer_t, pipe write fd, and coroutine)
-  struct PosixTimerResource {
-    timer_t timer_id;
-    int write_pipe_fd;
-    Coroutine *coroutine;  // Pointer to coroutine that owns this timer
-    
-    PosixTimerResource() : timer_id(nullptr), write_pipe_fd(-1), coroutine(nullptr) {}
-  };
-  
-  // Map to track timer resources by read pipe fd
-  absl::flat_hash_map<int, PosixTimerResource> posix_timer_map_;
-#endif
 };
 
 template <typename T>
