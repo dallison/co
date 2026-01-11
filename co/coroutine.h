@@ -95,7 +95,7 @@
 #include <sys/epoll.h>
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
-#define CO_TIMER_MODE CO_TIMER_POSIX // Change this line to use POSIX timer instead
+#define CO_TIMER_MODE CO_TIMER_TIMERFD // Change this line to use POSIX timer instead
 
 #elif defined(__QNX__) || defined(__QNXNTO__)
 // QNX configuration
