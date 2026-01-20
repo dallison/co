@@ -512,7 +512,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
 }
 
 void Coroutine::AddAbortFd() const {
-  if (!scheduler_.aborts_enabled__) {
+  if (!scheduler_.aborts_enabled_) {
     return;
   }
   if (abort_fd_ == -1) {
@@ -1486,7 +1486,7 @@ void CoroutineScheduler::TriggerInterrupt() const {
 }
 
 void CoroutineScheduler::Stop() {
-  if (aborts_enabled__) {
+  if (abort_on_stop_) {
     // Abort all coroutines.
     for (auto *c : coroutines_) {
       c->Abort();
