@@ -105,43 +105,46 @@ TEST(CoroutinesTest, MultipleFd) {
   ASSERT_EQ(0, pipe(pipes));
 
   // This will run first.
-  co::Coroutine c1(scheduler,
-                   [pipes](co::Coroutine *c) {
-                     ASSERT_EQ(pipes[0], c->Wait(pipes[0], POLLIN));
-                     std::cerr << "foo woke up\n";
-                     char buf;
-                     ASSERT_EQ(1, ::read(pipes[0], &buf, 1));
-                   },
-                   "foo");
+  co::Coroutine c1(
+      scheduler,
+      [pipes](co::Coroutine *c) {
+        ASSERT_EQ(pipes[0], c->Wait(pipes[0], POLLIN));
+        std::cerr << "foo woke up\n";
+        char buf;
+        ASSERT_EQ(1, ::read(pipes[0], &buf, 1));
+      },
+      "foo");
 
   // This will run second.
-  co::Coroutine c2(scheduler,
-                   [pipes](co::Coroutine *c) {
-                     // Waiting on the same fd is supported.
-                     auto fd = c->Wait(pipes[0], POLLIN);
-                     if (fd != pipes[0]) {
-                       std::cerr << "bar done with fd " << fd << "\n";
-                       return;
-                     }
-                     std::cerr << "bar woke up\n";
-                     // We've closed the pipe, so this will get EOF.
-                     char buf;
-                     ASSERT_EQ(0, ::read(pipes[0], &buf, 1));
-                   },
-                   "bar");
+  co::Coroutine c2(
+      scheduler,
+      [pipes](co::Coroutine *c) {
+        // Waiting on the same fd is supported.
+        auto fd = c->Wait(pipes[0], POLLIN);
+        if (fd != pipes[0]) {
+          std::cerr << "bar done with fd " << fd << "\n";
+          return;
+        }
+        std::cerr << "bar woke up\n";
+        // We've closed the pipe, so this will get EOF.
+        char buf;
+        ASSERT_EQ(0, ::read(pipes[0], &buf, 1));
+      },
+      "bar");
 
   // After c1 and c2 we will run this and it will wake up c1.
-  co::Coroutine c3(scheduler,
-                   [pipes](co::Coroutine *c) {
-                     // This will wake up foo but not bar.
-                     char buf = 'x';
-                     ASSERT_EQ(1, ::write(pipes[1], &buf, 1));
-                     c->Yield();
-                     std::cerr << "closing pipe\n";
-                     // This will wake bar.
-                     close(pipes[1]);
-                   },
-                   "baz");
+  co::Coroutine c3(
+      scheduler,
+      [pipes](co::Coroutine *c) {
+        // This will wake up foo but not bar.
+        char buf = 'x';
+        ASSERT_EQ(1, ::write(pipes[1], &buf, 1));
+        c->Yield();
+        std::cerr << "closing pipe\n";
+        // This will wake bar.
+        close(pipes[1]);
+      },
+      "baz");
   scheduler.Run();
   close(pipes[0]);
 }
@@ -233,6 +236,7 @@ TEST(CoroutinesTest, NonInvasiveTemplated) {
 
 TEST(CoroutinesTest, AbortWait) {
   co::CoroutineScheduler scheduler;
+  scheduler.SetAbortOnStop(true);
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
@@ -265,17 +269,18 @@ TEST(CoroutinesTest, AbortWait) {
 
 TEST(CoroutinesTest, AbortDestructor) {
   co::CoroutineScheduler scheduler;
+  scheduler.SetAbortOnStop(true);
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   struct Var {
-    Var(const char* n, bool &a) : name(n),  aborted(a) {}
+    Var(const char *n, bool &a) : name(n), aborted(a) {}
     ~Var() {
       aborted = true;
       std::cerr << "variable " << name << " destructed\n";
     }
-    const char* name;
+    const char *name;
     bool &aborted;
   };
 
@@ -307,6 +312,7 @@ TEST(CoroutinesTest, AbortDestructor) {
 
 TEST(CoroutinesTest, AbortSleep) {
   co::CoroutineScheduler scheduler;
+  scheduler.SetAbortOnStop(true);
 
   bool aborted = false;
   scheduler.Spawn([&aborted]() {
@@ -332,6 +338,7 @@ TEST(CoroutinesTest, AbortSleep) {
 
 TEST(CoroutinesTest, AbortYield) {
   co::CoroutineScheduler scheduler;
+  scheduler.SetAbortOnStop(true);
 
   bool aborted = false;
   scheduler.Spawn([&aborted]() {
@@ -362,9 +369,10 @@ TEST(CoroutinesTest, AbortSingle) {
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
+  scheduler.SetAbortOnStop(true);
 
   bool aborted = false;
-  const co::Coroutine* c;
+  const co::Coroutine *c;
   scheduler.Spawn([pipes, &aborted, &c]() {
     c = co::self;
     for (;;) {
@@ -389,4 +397,26 @@ TEST(CoroutinesTest, AbortSingle) {
   close(pipes[0]);
   close(pipes[1]);
   ASSERT_TRUE(aborted);
+}
+
+TEST(CoroutinesTest, AbortNestedShutdown) {
+  co::CoroutineScheduler scheduler;
+
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  const co::Coroutine *c;
+  scheduler.SetAbortOnStop(true);
+  scheduler.Spawn([&scheduler, pipes]() {
+    scheduler.Spawn([&scheduler]() {
+      co::Sleep(std::chrono::milliseconds(200));
+      scheduler.Stop();
+    });
+
+    std::cerr << "coroutine running\n";
+    [[maybe_unused]] int fd = co::Wait(pipes[0]);
+  });
+
+  scheduler.Run();
+  close(pipes[0]);
+  close(pipes[1]);
 }

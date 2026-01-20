@@ -650,8 +650,9 @@ public:
 
   // Enable the abort functionality for coroutines.  When enabled, you
   // can call Abort on a coroutine and the scheduler will abort all running
-  // coroutines when it is stoppe.d
-  void EnableAborts(bool enabled = true) { aborts_enabled__ = enabled; }
+  // coroutines when it is stopped.
+  void EnableAborts(bool enabled = true) { aborts_enabled_ = enabled; }
+  void SetAbortOnStop(bool abort_on_stop = false) { abort_on_stop_ = abort_on_stop; }
 
 #if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
@@ -739,7 +740,8 @@ protected:
 #if defined(CO_ADDRESS_SANITIZER)
   void *fake_stack_ = nullptr;
 #endif
-  std::atomic<bool> aborts_enabled__ = true;
+  std::atomic<bool> aborts_enabled_ = true;
+  std::atomic<bool> abort_on_stop_ = false;
 };
 
 template <typename T>
