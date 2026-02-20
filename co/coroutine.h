@@ -132,6 +132,7 @@
 #endif
 
 
+
 // Uncomment this if you want to see which context switcher is being used.
 // This is useful for debugging and understanding which context switcher
 // is being used in your code.  It will print a message at compile time
@@ -536,7 +537,7 @@ protected:
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
   mutable Context resume_;
   mutable Context exit_;
-  mutable int wait_result_;
+  mutable int wait_result_ = -1;  // Initialize to -1 to avoid garbage values
   mutable bool first_resume_ = true;
 
   // Abort handling.  If the scheduler has been configured to abort coroutines on stop.

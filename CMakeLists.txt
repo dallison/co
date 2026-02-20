@@ -71,7 +71,46 @@ target_link_libraries(co PUBLIC
     absl::time # Used by channel, future (for timeouts)
 )
 
-# Note: If there are tests in co, they would need a separate target
-# and link against gtest_main.
+# --- co_cpp20 Library Target ---
+# Standalone C++20 coroutine library (no dependency on 'co' or Abseil)
+add_library(co_cpp20 STATIC
+    co/coroutine_cpp20.cc
+    co/coroutine_cpp20.h
+)
 
+target_include_directories(co_cpp20 PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
+set_target_properties(co_cpp20 PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+
+# --- Tests ---
+enable_testing()
+
+# C++17 coroutine tests
+add_executable(coroutines_test
+    co/coroutines_test.cc
+)
+target_link_libraries(coroutines_test PRIVATE
+    co
+    absl::status
+    gtest_main
+)
+add_test(NAME coroutines_test COMMAND coroutines_test)
+
+# C++20 coroutine tests
+add_executable(test_cpp20
+    co/test_cpp20.cc
+)
+target_link_libraries(test_cpp20 PRIVATE
+    co_cpp20
+    gtest_main
+)
+set_target_properties(test_cpp20 PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+add_test(NAME test_cpp20 COMMAND test_cpp20)

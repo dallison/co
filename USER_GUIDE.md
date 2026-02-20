@@ -1,44 +1,59 @@
-# User Guide: Coroutine and CoroutineScheduler APIs
+# User Guide: Coroutine APIs
 
-This guide provides an introduction to using the `co::Coroutine` and `co::CoroutineScheduler` APIs for writing asynchronous, cooperative multitasking code in C++.
+This guide covers both the C++17 stackful coroutine API (`co::` namespace) and
+the C++20 stackless coroutine API (`co20::` namespace).
 
 ## Table of Contents
 
 1. [Introduction](#introduction)
 2. [Basic Concepts](#basic-concepts)
-3. [Creating a Scheduler](#creating-a-scheduler)
-4. [Creating Coroutines](#creating-coroutines)
-   - [Using Spawn](#using-spawn)
-   - [Using Coroutine Constructor](#using-coroutine-constructor)
-5. [Waiting for Events](#waiting-for-events)
-   - [Wait](#wait)
-   - [Poll](#poll)
-   - [PollAndWait](#pollandwait)
-   - [Timeouts](#timeouts)
-6. [Yielding Control](#yielding-control)
-7. [Sleeping](#sleeping)
-8. [Generators](#generators)
-9. [Complete Examples](#complete-examples)
-10. [Best Practices](#best-practices)
+3. [C++17 API](#c17-api)
+   - [Creating a Scheduler](#creating-a-scheduler)
+   - [Creating Coroutines](#creating-coroutines)
+   - [Waiting for Events](#waiting-for-events)
+   - [Yielding Control](#yielding-control)
+   - [Sleeping](#sleeping)
+   - [Generators](#generators)
+   - [Complete Examples](#complete-examples)
+4. [C++20 API](#c20-api)
+   - [Getting Started](#getting-started)
+   - [Free Functions vs Coroutine Reference](#free-functions-vs-coroutine-reference)
+   - [Waiting for Events (C++20)](#waiting-for-events-c20)
+   - [Sleeping (C++20)](#sleeping-c20)
+   - [Aborting Coroutines](#aborting-coroutines)
+   - [Accessing Self and Scheduler](#accessing-self-and-scheduler)
+   - [Complete Examples (C++20)](#complete-examples-c20)
+5. [Best Practices](#best-practices)
 
 ## Introduction
 
-The coroutine library provides a lightweight, stackful coroutine implementation for C++. Coroutines allow you to write asynchronous code that looks synchronous, making it easier to handle I/O operations, timers, and concurrent tasks without the complexity of threads or callbacks.
+This library provides two coroutine implementations:
+
+- **C++17 Stackful Coroutines** (`co::` namespace) -- Uses manual stack switching with a custom context switcher. Full-featured with generators, multiple wait modes, and broad platform support.
+- **C++20 Stackless Coroutines** (`co20::` namespace) -- A standalone library using C++20 `co_await`/`co_return`. Lightweight, no dependency on the C++17 library.
 
 Key features:
-- **Cooperative multitasking**: Coroutines yield control explicitly, allowing fine-grained control over execution
-- **Event-driven I/O**: Efficiently wait for file descriptors to become ready
-- **Lightweight**: Each coroutine has its own stack (default 64KB)
+- **Cooperative multitasking**: Coroutines yield control explicitly
+- **Event-driven I/O**: Efficiently wait for file descriptors via epoll (Linux) or poll
+- **Lightweight**: C++17 coroutines use fixed-size stacks (default 64KB); C++20 coroutines use compiler-managed frames
 - **Portable**: Works on Linux, macOS, and other Unix-like systems
+- **Free-function API**: Both libraries provide namespace-scoped free functions so coroutine bodies don't need explicit parameter passing
 
 ## Basic Concepts
 
-- **CoroutineScheduler**: Manages and runs multiple coroutines. You typically create one scheduler per application or per thread.
-- **Coroutine**: A single execution context with its own stack. Coroutines are created with a function that defines their behavior.
+- **Scheduler**: Manages and runs multiple coroutines. You typically create one scheduler per application or per thread.
+- **Coroutine**: A single execution context. C++17 coroutines have their own stack; C++20 coroutines use compiler-generated frames.
 - **Yield**: Voluntarily give up control to allow other coroutines to run.
-- **Wait**: Block until a file descriptor becomes ready for I/O.
+- **Wait**: Suspend until a file descriptor becomes ready for I/O.
+- **Task** (C++20 only): The return type for C++20 coroutine functions.
 
-## Creating a Scheduler
+---
+
+## C++17 API
+
+The C++17 API uses the `co::` namespace. Coroutines are stackful -- each one gets its own stack -- and suspend operations are regular function calls.
+
+### Creating a Scheduler
 
 Start by creating a `CoroutineScheduler`:
 
@@ -462,19 +477,20 @@ int main() {
 }
 ```
 
-## Best Practices
+## Best Practices (C++17)
 
 1. **Use Spawn for simple coroutines**: The `Spawn` method is cleaner and automatically manages coroutine lifetime.
 
 2. **Always check return values**: `Wait` returns `-1` on timeout, so always check the return value:
-   ```cpp
-   int fd = co::Wait(pipe_fd, POLLIN, timeout);
-   if (fd == -1) {
-       // Handle timeout
-   } else if (fd == pipe_fd) {
-       // Handle ready fd
-   }
-   ```
+
+```cpp
+int fd = co::Wait(pipe_fd, POLLIN, timeout);
+if (fd == -1) {
+    // Handle timeout
+} else if (fd == pipe_fd) {
+    // Handle ready fd
+}
+```
 
 3. **Close file descriptors**: Always close file descriptors when done to avoid resource leaks.
 
@@ -482,50 +498,300 @@ int main() {
 
 5. **Yield periodically**: In long-running coroutines without I/O, call `Yield()` periodically to allow other coroutines to run.
 
-6. **Interrupt FDs**: For coroutines that need to be cancelled, use an interrupt file descriptor:
-   ```cpp
-   CoroutineOptions opts;
-   opts.interrupt_fd = interrupt_pipe[0];  // Monitor this fd
-   
-   // In another coroutine, write to interrupt_pipe[1] to wake up the coroutine
-   ```
+6. **Non-invasive API**: Prefer the free functions (`co::Wait`, `co::Yield`, etc.) over passing a `Coroutine*` parameter.
 
-7. **Stack size**: Adjust stack size for coroutines that need more stack space:
-   ```cpp
-   CoroutineOptions opts;
-   opts.stack_size = 256 * 1024;  // 256KB
-   ```
+### C++17 API Reference Summary
 
-8. **Non-invasive API**: When using `Spawn`, prefer the non-invasive API (`co::Wait`, `co::Yield`, etc.) as it's cleaner and doesn't require passing a `Coroutine*` parameter.
+**CoroutineScheduler:**
+- `Run()` -- run the scheduler until all coroutines complete
+- `Stop()` -- stop the scheduler
+- `Spawn(function, options)` -- create and start a coroutine
 
-## API Reference Summary
+**Free functions (co:: namespace):**
+- `co::self` -- pointer to the currently running coroutine
+- `co::scheduler` -- pointer to the current scheduler
+- `co::Wait(fd, events, timeout)` -- wait for FD readiness
+- `co::Poll(fds, events)` -- non-blocking FD check
+- `co::PollAndWait(fd, events, timeout)` -- poll then wait if needed
+- `co::Yield()` -- yield control
+- `co::Sleep(duration)` -- sleep (chrono duration)
+- `co::Millisleep(ms)` -- sleep for milliseconds
+- `co::Nanosleep(ns)` -- sleep for nanoseconds
 
-### CoroutineScheduler
+For full details, see `co/coroutine.h`.
 
-- `Run()`: Run the scheduler until all coroutines complete
-- `Stop()`: Stop the scheduler (thread-safe)
-- `Spawn(function, options)`: Create and start a coroutine
-- `Show()`: Print state of all coroutines (for debugging)
+---
 
-### Coroutine (when using constructor)
+## C++20 API
 
-- `Wait(fd, events, timeout)`: Wait for fd to become ready
-- `Poll(fds, events)`: Check if fds are ready (non-blocking)
-- `PollAndWait(fd, events, timeout)`: Poll then wait if needed
-- `Yield()`: Yield control to other coroutines
-- `Sleep(duration)`: Sleep for specified duration
-- `Millisleep(ms)`: Sleep for milliseconds
-- `Nanosleep(ns)`: Sleep for nanoseconds
+The C++20 library is a separate, standalone implementation in the `co20::` namespace. It has no dependency on the C++17 library or on Abseil. It uses C++20 compiler coroutines (`co_await`, `co_return`) and an epoll/poll-based scheduler.
 
-### Non-invasive API (when using Spawn)
+Include `co/coroutine_cpp20.h` to use it. You must compile with `-std=c++20`.
 
-- `co::Wait(fd, events, timeout)`: Wait for fd
-- `co::Poll(fds, events)`: Poll fds
-- `co::PollAndWait(fd, events, timeout)`: Poll then wait
-- `co::Yield()`: Yield control
-- `co::Sleep(duration)`: Sleep
-- `co::Millisleep(ms)`: Sleep milliseconds
-- `co::Nanosleep(ns)`: Sleep nanoseconds
+### Getting Started
 
-For more details, see the header file `co/coroutine.h`.
+```cpp
+#include "co/coroutine_cpp20.h"
+
+co20::Scheduler scheduler;
+
+scheduler.Spawn([]() -> co20::Task {
+  co_await co20::Yield();
+  co_return;
+}, "my_coroutine");
+
+scheduler.Run();
+```
+
+Key differences from the C++17 API:
+- Coroutine functions must return `co20::Task`
+- All suspend operations (`Yield`, `Wait`, `Sleep`) return awaitables and must be used with `co_await`
+- Use `co_return` instead of a normal `return`
+
+### Free Functions vs Coroutine Reference
+
+There are two styles for writing coroutine bodies. Both are fully supported.
+
+**Free-function style** -- the coroutine lambda takes no parameters and uses
+`co20::Yield()`, `co20::Wait()`, `co20::Sleep()`, etc.:
+
+```cpp
+scheduler.Spawn([]() -> co20::Task {
+  co_await co20::Sleep(std::chrono::milliseconds(100));
+  int fd = co_await co20::Wait(my_fd, POLLIN);
+  co_await co20::Yield();
+  co_return;
+}, "my_coroutine");
+```
+
+**Coroutine-reference style** -- the lambda receives a `co20::Coroutine&` and
+calls methods on it:
+
+```cpp
+scheduler.Spawn([](co20::Coroutine& co) -> co20::Task {
+  co_await co.Sleep(std::chrono::milliseconds(100));
+  int fd = co_await co.Wait(my_fd, POLLIN);
+  co_await co.Yield();
+  co_return;
+}, "my_coroutine");
+```
+
+The free-function style is generally preferred as it's cleaner. Both styles
+can be mixed in the same program.
+
+### Waiting for Events (C++20)
+
+`Wait` suspends the coroutine until a file descriptor becomes ready:
+
+```cpp
+scheduler.Spawn([pipes]() -> co20::Task {
+  // Wait for data to be available for reading
+  int fd = co_await co20::Wait(pipes[0], POLLIN);
+  if (fd == pipes[0]) {
+    char buf[256];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    // Process data...
+  }
+  co_return;
+});
+```
+
+`Wait` returns the file descriptor if it became ready, or `-1` on timeout/error.
+Event masks are the standard poll flags: `POLLIN`, `POLLOUT`, etc.
+
+### Sleeping (C++20)
+
+```cpp
+scheduler.Spawn([]() -> co20::Task {
+  // Sleep using std::chrono (recommended)
+  co_await co20::Sleep(std::chrono::milliseconds(100));
+  co_await co20::Sleep(std::chrono::seconds(1));
+
+  // Sleep for raw nanoseconds
+  co_await co20::Sleep(1000000ULL);  // 1ms
+
+  // Convenience functions
+  co_await co20::Millisleep(100);
+  co_await co20::Nanosleep(500000000ULL);  // 0.5s
+
+  co_return;
+});
+```
+
+### Aborting Coroutines
+
+A coroutine can be aborted from another coroutine. The aborted coroutine will
+receive an `AbortException` the next time it hits a `co_await` on `Yield`, `Wait`,
+or `Sleep`. Catch the exception to perform cleanup:
+
+```cpp
+co20::Scheduler scheduler;
+
+struct State {
+  bool aborted = false;
+  co20::Coroutine* target = nullptr;
+} state;
+
+scheduler.Spawn([&state]() -> co20::Task {
+  state.target = co20::self;
+  try {
+    for (;;) {
+      co_await co20::Sleep(std::chrono::seconds(10));
+    }
+  } catch (...) {
+    state.aborted = true;
+  }
+  co_return;
+}, "worker");
+
+scheduler.Spawn([&state]() -> co20::Task {
+  co_await co20::Sleep(std::chrono::milliseconds(100));
+  if (state.target) {
+    state.target->Abort();
+  }
+  co_return;
+}, "controller");
+
+scheduler.Run();
+// state.aborted is now true
+```
+
+### Accessing Self and Scheduler
+
+Inside a coroutine, you can access the current coroutine and scheduler via
+thread-local pointers, just like the C++17 API:
+
+```cpp
+scheduler.Spawn([]() -> co20::Task {
+  // Get the current coroutine
+  co20::Coroutine* me = co20::self;
+  std::cout << "My name is: " << me->Name() << std::endl;
+
+  // Get the scheduler
+  co20::Scheduler* sched = co20::scheduler;
+
+  // Or via the coroutine
+  co20::Scheduler& sched2 = me->GetScheduler();
+
+  co_return;
+}, "example");
+```
+
+### Complete Examples (C++20)
+
+#### Producer-Consumer with Pipes
+
+```cpp
+#include "co/coroutine_cpp20.h"
+#include <unistd.h>
+
+int main() {
+  co20::Scheduler scheduler;
+  int pipes[2];
+  pipe(pipes);
+
+  // Producer
+  scheduler.Spawn([pipes]() -> co20::Task {
+    for (int i = 0; i < 10; i++) {
+      int fd = co_await co20::Wait(pipes[1], POLLOUT);
+      if (fd == pipes[1]) {
+        char c = 'A' + i;
+        write(fd, &c, 1);
+      }
+    }
+    close(pipes[1]);
+    co_return;
+  }, "producer");
+
+  // Consumer
+  scheduler.Spawn([pipes]() -> co20::Task {
+    for (;;) {
+      int fd = co_await co20::Wait(pipes[0], POLLIN);
+      if (fd != pipes[0]) break;
+
+      char c;
+      ssize_t n = read(fd, &c, 1);
+      if (n == 0) break;
+      printf("Received: %c\n", c);
+    }
+    close(pipes[0]);
+    co_return;
+  }, "consumer");
+
+  scheduler.Run();
+  return 0;
+}
+```
+
+#### Multiple Coroutines Yielding
+
+```cpp
+#include "co/coroutine_cpp20.h"
+#include <cstdio>
+
+int main() {
+  co20::Scheduler scheduler;
+
+  for (int i = 0; i < 5; i++) {
+    scheduler.Spawn([i]() -> co20::Task {
+      for (int j = 0; j < 3; j++) {
+        printf("Coroutine %d, iteration %d\n", i, j);
+        co_await co20::Yield();
+      }
+      co_return;
+    }, "co_" + std::to_string(i));
+  }
+
+  scheduler.Run();
+  return 0;
+}
+```
+
+### C++20 API Reference Summary
+
+**co20::Scheduler:**
+- `Run()` -- run the scheduler until all coroutines complete
+- `Stop()` -- stop the scheduler
+- `Spawn(function, name)` -- create and start a coroutine (accepts lambdas with or without `Coroutine&` parameter)
+
+**co20::Coroutine:**
+- `Yield()` -- returns a `YieldAwaitable`
+- `Wait(fd, event_mask, timeout_ns)` -- returns a `WaitAwaitable`
+- `Sleep(nanoseconds)` -- returns a `SleepAwaitable`
+- `Sleep(std::chrono::duration)` -- returns a `SleepAwaitable`
+- `Abort()` -- request abort (throws `AbortException` at next suspend point)
+- `IsAborted()` -- check if abort has been requested
+- `Name()` -- get the coroutine's name
+- `GetState()` -- get current state
+- `GetScheduler()` -- get the owning scheduler
+
+**Free functions (co20:: namespace):**
+- `co20::self` -- pointer to the currently running coroutine
+- `co20::scheduler` -- pointer to the current scheduler
+- `co20::Yield()` -- yield control (returns awaitable)
+- `co20::Wait(fd, event_mask, timeout_ns)` -- wait for FD (returns awaitable)
+- `co20::Sleep(nanoseconds)` -- sleep (returns awaitable)
+- `co20::Sleep(std::chrono::duration)` -- sleep with chrono (returns awaitable)
+- `co20::Millisleep(ms)` -- sleep for milliseconds (returns awaitable)
+- `co20::Nanosleep(ns)` -- sleep for nanoseconds (returns awaitable)
+
+For full details, see `co/coroutine_cpp20.h`.
+
+---
+
+## Best Practices
+
+1. **Always check Wait return values**: `Wait` returns `-1` on timeout/error. Always check.
+
+2. **Close file descriptors**: Always close FDs when done to avoid resource leaks.
+
+3. **Yield periodically**: In long-running coroutines without I/O, call `Yield()` to allow other coroutines to run.
+
+4. **Prefer the free-function API**: Using `co::Yield()` / `co20::Yield()` is cleaner than passing coroutine pointers or references.
+
+5. **Use `co_return`**: In C++20 coroutines, always end with `co_return` and never use a bare `return` statement.
+
+6. **Avoid `ASSERT_*` / `FAIL()` in C++20 coroutines**: Google Test macros that expand to `return` statements won't compile inside coroutines. Use `EXPECT_*` or store results in variables and assert after `Run()`.
+
+7. **Use struct captures for shared state in C++20 tests**: When multiple C++20 coroutines need to share variables, put them in a struct and capture a reference to the struct to avoid lambda capture issues with coroutine frames.
 

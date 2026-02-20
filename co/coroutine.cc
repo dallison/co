@@ -569,7 +569,50 @@ int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
   }
   return -1;
 }
+
 int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
+      // Clean up wait_fds_ and timer (similar to EndOfWait)
+      // Find timer_fd - it's the fd in wait_fds_ that's not our target fd, interrupt_fd, or abort_fd_
+      int timer_fd = -1;
+      for (const auto& wfd : wait_fds_) {
+#if CO_POLL_MODE == CO_POLL_EPOLL
+        int check_fd = wfd.fd;
+#else
+        int check_fd = wfd.fd;
+#endif
+        if (check_fd != fd && check_fd != interrupt_fd_ && check_fd != abort_fd_) {
+          timer_fd = check_fd;
+          break;
+        }
+      }
+      wait_fds_.clear();
+      if (timer_fd != -1) {
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+        if (timer_fd == posix_timer_read_fd_) {
+          CleanupPosixTimer();
+        } else {
+          close(timer_fd);
+        }
+#else
+        close(timer_fd);
+#endif
+      }
+      if (result == abort_fd_) {
+        abort_pending_ = true;
+        throw AbortException();
+      }
+      if (result == timer_fd) {
+        std::cerr << "[Wait] Timeout, returning -1" << std::endl;
+        return -1;
+      }
+      std::cerr << "[Wait] Returning result=" << result << " for fd=" << fd << std::endl;
+      return result;
+    }
+    // If ready, return immediately
+    std::cerr << "[Wait] Ready immediately, returning " << awaiter.await_resume() << std::endl;
+    return awaiter.await_resume();
+  }
+#endif
 #if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
   if (interrupt_fd_ != -1) {
