@@ -2,6 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+// Copyright 2026 Cruise LLC.
+
 #pragma once
 
 // Poll mode constants - must be defined before use in conditionals.

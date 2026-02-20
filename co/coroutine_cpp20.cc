@@ -2,6 +2,8 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
+// Copyright 2026 Cruise LLC.
+
 #include "coroutine_cpp20.h"
 
 #if CO20_HAVE_COROUTINES
