@@ -18,6 +18,24 @@
 #endif
 #endif
 
+// Timer mode constants.
+// 1. CO_TIMER_TIMERFD - Linux timerfd (Linux only)
+// 2. CO_TIMER_EVENT   - macOS kqueue EVFILT_TIMER (macOS only)
+// 3. CO_TIMER_POSIX   - POSIX timer_create with pipe (portable)
+#define CO_TIMER_TIMERFD 1
+#define CO_TIMER_EVENT 2
+#define CO_TIMER_POSIX 3
+
+#ifndef CO_TIMER_MODE
+#if defined(__APPLE__)
+#define CO_TIMER_MODE CO_TIMER_EVENT
+#elif defined(__linux__)
+#define CO_TIMER_MODE CO_TIMER_TIMERFD
+#else
+#define CO_TIMER_MODE CO_TIMER_POSIX
+#endif
+#endif
+
 // Check for C++20 coroutine support
 #if __cplusplus >= 202002L
   #if __has_include(<coroutine>)
@@ -60,6 +78,15 @@
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 #include <sys/epoll.h>
+#endif
+
+#if CO_TIMER_MODE == CO_TIMER_EVENT
+#include <sys/event.h>
+#endif
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+#include <signal.h>
+#include <time.h>
 #endif
 
 namespace co20 {
@@ -181,6 +208,14 @@ private:
   std::unordered_map<int, std::vector<Coroutine*>> waiting_fds_;
   std::unordered_map<Coroutine*, int> coroutine_fds_;
   std::unordered_set<int> timerfds_;
+
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  struct PosixTimerInfo {
+    timer_t timer_id;
+    int write_fd;
+  };
+  std::unordered_map<int, PosixTimerInfo> posix_timers_;
+#endif
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int epoll_fd_ = -1;

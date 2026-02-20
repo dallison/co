@@ -10,7 +10,12 @@
 
 #if defined(__linux__)
 #include <sys/eventfd.h>
+#endif
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
 #include <sys/timerfd.h>
+#endif
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+#include <signal.h>
 #endif
 #include <algorithm>
 #include <cstring>
@@ -49,6 +54,23 @@ Scheduler::Scheduler() {
 }
 
 Scheduler::~Scheduler() {
+  for (int fd : timerfds_) {
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+    auto pt = posix_timers_.find(fd);
+    if (pt != posix_timers_.end()) {
+      struct itimerspec disarm = {};
+      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+      timer_delete(pt->second.timer_id);
+      close(pt->second.write_fd);
+    }
+#endif
+    close(fd);
+  }
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  posix_timers_.clear();
+#endif
+  timerfds_.clear();
+
   if (interrupt_fd_ != -1) {
     close(interrupt_fd_);
   }
@@ -125,6 +147,22 @@ void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
 #endif
     }
   }
+
+  if (timerfds_.count(fd) > 0) {
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+    auto pt = posix_timers_.find(fd);
+    if (pt != posix_timers_.end()) {
+      struct itimerspec disarm = {};
+      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+      timer_delete(pt->second.timer_id);
+      close(pt->second.write_fd);
+      posix_timers_.erase(pt);
+    }
+#endif
+    close(fd);
+    timerfds_.erase(fd);
+  }
+
   coroutine_fds_.erase(fd_it);
 }
 
@@ -212,7 +250,7 @@ void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
     return;
   }
 
-#if defined(__linux__)
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
   int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
   if (timer_fd == -1) {
     ScheduleCoroutine(coroutine);
@@ -227,10 +265,68 @@ void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
   timerfd_settime(timer_fd, 0, &its, nullptr);
 
   WaitForFd(coroutine, timer_fd, POLLIN, 0);
-#else
-  // Non-Linux: no timerfd available. Schedule immediately as a fallback.
-  // TODO: implement proper timer using kqueue/POSIX timers.
-  ScheduleCoroutine(coroutine);
+
+#elif CO_TIMER_MODE == CO_TIMER_EVENT
+  int kq = kqueue();
+  if (kq == -1) {
+    ScheduleCoroutine(coroutine);
+    return;
+  }
+
+  timerfds_.insert(kq);
+
+  struct kevent ev;
+  EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS, nanoseconds, 0);
+  kevent(kq, &ev, 1, nullptr, 0, nullptr);
+
+  WaitForFd(coroutine, kq, POLLIN, 0);
+
+#elif CO_TIMER_MODE == CO_TIMER_POSIX
+  int pipe_fds[2];
+  if (pipe(pipe_fds) == -1) {
+    ScheduleCoroutine(coroutine);
+    return;
+  }
+
+  int read_fd = pipe_fds[0];
+  int write_fd = pipe_fds[1];
+
+  fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL, 0) | O_NONBLOCK);
+  fcntl(write_fd, F_SETFL, fcntl(write_fd, F_GETFL, 0) | O_NONBLOCK);
+
+  struct sigevent se = {};
+  se.sigev_notify = SIGEV_THREAD;
+  se.sigev_notify_attributes = nullptr;
+  se.sigev_value.sival_int = write_fd;
+  se.sigev_notify_function = [](union sigval sv) {
+    char c = 1;
+    (void)write(sv.sival_int, &c, 1);
+  };
+
+  timer_t timer_id;
+  if (timer_create(CLOCK_REALTIME, &se, &timer_id) == -1) {
+    close(read_fd);
+    close(write_fd);
+    ScheduleCoroutine(coroutine);
+    return;
+  }
+
+  struct itimerspec its = {};
+  its.it_value.tv_sec = nanoseconds / 1000000000ULL;
+  its.it_value.tv_nsec = nanoseconds % 1000000000ULL;
+
+  if (timer_settime(timer_id, 0, &its, nullptr) == -1) {
+    timer_delete(timer_id);
+    close(read_fd);
+    close(write_fd);
+    ScheduleCoroutine(coroutine);
+    return;
+  }
+
+  timerfds_.insert(read_fd);
+  posix_timers_[read_fd] = {timer_id, write_fd};
+
+  WaitForFd(coroutine, read_fd, POLLIN, 0);
 #endif
 }
 
@@ -248,11 +344,21 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
       list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
     }
 
-    // Clean up scheduler-owned timerfds.
-#if defined(__linux__)
+    // Clean up scheduler-owned timer FDs.
     if (fd != interrupt_fd_ && timerfds_.count(fd) > 0) {
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
       uint64_t val;
       (void)read(fd, &val, sizeof(val));
+#elif CO_TIMER_MODE == CO_TIMER_POSIX
+      auto pt = posix_timers_.find(fd);
+      if (pt != posix_timers_.end()) {
+        struct itimerspec disarm = {};
+        timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+        timer_delete(pt->second.timer_id);
+        close(pt->second.write_fd);
+        posix_timers_.erase(pt);
+      }
+#endif
       close(fd);
 #if CO_POLL_MODE == CO_POLL_EPOLL
       if (epoll_fd_ != -1) {
@@ -265,7 +371,6 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
       coroutine_fds_.erase(it);
       timerfds_.erase(fd);
     }
-#endif
   }
 
   coroutine->SetWaitResult(value);
