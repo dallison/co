@@ -2,7 +2,11 @@
 
 #include "coroutine_cpp20.h"
 #include <gtest/gtest.h>
+#include <fcntl.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/eventfd.h>
+#endif
 
 #if CO20_HAVE_COROUTINES
 
@@ -453,6 +457,179 @@ TEST(Cpp20Free, AbortWithSelf) {
   EXPECT_TRUE(state.aborted);
 }
 #endif
+
+TEST(Cpp20, InterruptFd) {
+  Scheduler scheduler;
+
+#if defined(__linux__)
+  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  ASSERT_NE(efd, -1);
+#else
+  int p[2];
+  ASSERT_EQ(pipe(p), 0);
+  int efd = p[0];
+  fcntl(p[0], F_SETFL, O_NONBLOCK);
+  fcntl(p[1], F_SETFL, O_NONBLOCK);
+#endif
+
+  int data_pipes[2];
+  ASSERT_EQ(pipe(data_pipes), 0);
+
+  bool interrupted = false;
+  int wait_result = -1;
+
+  scheduler.Spawn([&data_pipes, &interrupted, &wait_result](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(data_pipes[0], POLLIN);
+    wait_result = fd;
+    if (fd == co.GetInterruptFd()) {
+      interrupted = true;
+    }
+    co_return;
+  }, "waiting", efd);
+
+  scheduler.Spawn([&efd
+#if !defined(__linux__)
+    , &p
+#endif
+    ](Coroutine& co) -> Task {
+    co_await co.Sleep(50000000ULL); // 50ms
+#if defined(__linux__)
+    uint64_t val = 1;
+    (void)write(efd, &val, sizeof(val));
+#else
+    char c = 'x';
+    (void)write(p[1], &c, 1);
+#endif
+    co_return;
+  }, "interrupter");
+
+  scheduler.Run();
+
+  EXPECT_TRUE(interrupted);
+  EXPECT_NE(wait_result, data_pipes[0]);
+
+  close(data_pipes[0]);
+  close(data_pipes[1]);
+#if defined(__linux__)
+  close(efd);
+#else
+  close(p[0]);
+  close(p[1]);
+#endif
+}
+
+TEST(Cpp20, InterruptFdWithFreeFunction) {
+  Scheduler scheduler;
+
+#if defined(__linux__)
+  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  ASSERT_NE(efd, -1);
+#else
+  int p[2];
+  ASSERT_EQ(pipe(p), 0);
+  int efd = p[0];
+  fcntl(p[0], F_SETFL, O_NONBLOCK);
+  fcntl(p[1], F_SETFL, O_NONBLOCK);
+#endif
+
+  int data_pipes[2];
+  ASSERT_EQ(pipe(data_pipes), 0);
+
+  bool interrupted = false;
+  int wait_result = -1;
+
+  scheduler.Spawn([&data_pipes, &interrupted, &wait_result]() -> Task {
+    int fd = co_await co20::Wait(data_pipes[0], POLLIN);
+    wait_result = fd;
+    if (fd == co20::self->GetInterruptFd()) {
+      interrupted = true;
+    }
+    co_return;
+  }, "waiting", efd);
+
+  scheduler.Spawn([&efd
+#if !defined(__linux__)
+    , &p
+#endif
+    ](Coroutine& co) -> Task {
+    co_await co.Sleep(50000000ULL);
+#if defined(__linux__)
+    uint64_t val = 1;
+    (void)write(efd, &val, sizeof(val));
+#else
+    char c = 'x';
+    (void)write(p[1], &c, 1);
+#endif
+    co_return;
+  }, "interrupter");
+
+  scheduler.Run();
+
+  EXPECT_TRUE(interrupted);
+  EXPECT_NE(wait_result, data_pipes[0]);
+
+  close(data_pipes[0]);
+  close(data_pipes[1]);
+#if defined(__linux__)
+  close(efd);
+#else
+  close(p[0]);
+  close(p[1]);
+#endif
+}
+
+TEST(Cpp20, InterruptFdDataFirst) {
+  Scheduler scheduler;
+
+#if defined(__linux__)
+  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  ASSERT_NE(efd, -1);
+#else
+  int p[2];
+  ASSERT_EQ(pipe(p), 0);
+  int efd = p[0];
+  fcntl(p[0], F_SETFL, O_NONBLOCK);
+  fcntl(p[1], F_SETFL, O_NONBLOCK);
+#endif
+
+  int data_pipes[2];
+  ASSERT_EQ(pipe(data_pipes), 0);
+
+  bool got_data = false;
+  int wait_result = -1;
+
+  scheduler.Spawn([&data_pipes, &got_data, &wait_result](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(data_pipes[0], POLLIN);
+    wait_result = fd;
+    if (fd == data_pipes[0]) {
+      got_data = true;
+      char buf[16];
+      (void)read(data_pipes[0], buf, sizeof(buf));
+    }
+    co_return;
+  }, "waiting", efd);
+
+  scheduler.Spawn([&data_pipes](Coroutine& co) -> Task {
+    co_await co.Yield();
+    char c = 'D';
+    (void)write(data_pipes[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  scheduler.Run();
+
+  EXPECT_TRUE(got_data);
+  EXPECT_EQ(wait_result, data_pipes[0]);
+
+  close(data_pipes[0]);
+  close(data_pipes[1]);
+#if defined(__linux__)
+  close(efd);
+#else
+  close(p[0]);
+  close(p[1]);
+#endif
+}
 
 } // namespace co20
 

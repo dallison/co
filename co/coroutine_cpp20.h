@@ -72,8 +72,8 @@
 #include <sys/poll.h>
 #include <type_traits>
 #include <unistd.h>
-#include <unordered_map>
-#include <unordered_set>
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include <vector>
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -121,9 +121,13 @@ public:
   friend struct Task;
 
   template<typename Func>
-  Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "");
+  Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "",
+            int interrupt_fd = -1);
 
   ~Coroutine() {
+    if (interrupt_fd_ != -1) {
+      close(interrupt_fd_);
+    }
     if (handle_) {
       handle_.destroy();
     }
@@ -147,6 +151,7 @@ public:
   const std::string& Name() const { return name_; }
   State GetState() const { return state_; }
   Scheduler& GetScheduler() const { return scheduler_; }
+  int GetInterruptFd() const { return interrupt_fd_; }
 
 private:
   void SetHandle(std::coroutine_handle<> handle) { handle_ = handle; }
@@ -163,6 +168,7 @@ private:
   bool abort_pending_ = false;
   int id_;
   int wait_result_ = -1;
+  int interrupt_fd_ = -1;
 };
 
 // Manages a set of coroutines, scheduling them cooperatively using
@@ -176,8 +182,10 @@ public:
   void Stop() { running_ = false; }
 
   template<typename Func>
-  Coroutine* Spawn(Func&& func, const std::string& name = "") {
-    auto coroutine = std::make_unique<Coroutine>(*this, std::forward<Func>(func), name);
+  Coroutine* Spawn(Func&& func, const std::string& name = "",
+                   int interrupt_fd = -1) {
+    auto coroutine = std::make_unique<Coroutine>(*this, std::forward<Func>(func), name,
+                                                 interrupt_fd);
     Coroutine* ptr = coroutine.get();
     coroutines_.push_back(std::move(coroutine));
     ptr->SetState(Coroutine::State::kReady);
@@ -205,16 +213,16 @@ private:
   bool running_ = false;
   std::vector<std::unique_ptr<Coroutine>> coroutines_;
   std::deque<Coroutine*> ready_queue_;
-  std::unordered_map<int, std::vector<Coroutine*>> waiting_fds_;
-  std::unordered_map<Coroutine*, int> coroutine_fds_;
-  std::unordered_set<int> timerfds_;
+  absl::flat_hash_map<int, std::vector<Coroutine*>> waiting_fds_;
+  absl::flat_hash_map<Coroutine*, int> coroutine_fds_;
+  absl::flat_hash_set<int> timerfds_;
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   struct PosixTimerInfo {
     timer_t timer_id;
     int write_fd;
   };
-  std::unordered_map<int, PosixTimerInfo> posix_timers_;
+  absl::flat_hash_map<int, PosixTimerInfo> posix_timers_;
 #endif
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -336,14 +344,16 @@ struct SleepAwaitable : BaseAwaitable {
 // --- Coroutine inline implementations (need full Scheduler definition) ---
 
 template<typename Func>
-inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string& name)
+inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string& name,
+                            int interrupt_fd)
   : handle_(),
     scheduler_(scheduler),
     state_(State::kNew),
     name_(),
     abort_pending_(false),
     id_(scheduler.AllocateId()),
-    wait_result_(-1) {
+    wait_result_(-1),
+    interrupt_fd_(interrupt_fd == -1 ? -1 : dup(interrupt_fd)) {
   name_ = name.empty() ? "co-" + std::to_string(id_) : name;
 
   auto task = [&]() {

@@ -118,7 +118,8 @@ free functions in the `co::` namespace:
 ## The C++20 API
 
 The C++20 library lives in the `co20::` namespace and is completely standalone
-(no dependency on the C++17 library or Abseil). It requires a C++20 compiler.
+(no dependency on the C++17 library). It requires a C++20 compiler and uses
+Abseil's `flat_hash_map`/`flat_hash_set` for fast container lookups.
 
 Key differences from the C++17 API:
 - All suspend operations use `co_await`

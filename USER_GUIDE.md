@@ -524,7 +524,7 @@ For full details, see `co/coroutine.h`.
 
 ## C++20 API
 
-The C++20 library is a separate, standalone implementation in the `co20::` namespace. It has no dependency on the C++17 library or on Abseil. It uses C++20 compiler coroutines (`co_await`, `co_return`) and an epoll/poll-based scheduler.
+The C++20 library is a separate, standalone implementation in the `co20::` namespace. It has no dependency on the C++17 library. It uses C++20 compiler coroutines (`co_await`, `co_return`), an epoll/poll-based scheduler, and Abseil's `flat_hash_map`/`flat_hash_set` for fast container lookups.
 
 Include `co/coroutine_cpp20.h` to use it. You must compile with `-std=c++20`.
 

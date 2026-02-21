@@ -131,39 +131,58 @@ int Scheduler::PollFd(int fd, uint32_t event_mask) {
 // any scheduler-owned FDs (timerfds). Called when a coroutine finishes.
 void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
   auto fd_it = coroutine_fds_.find(coroutine);
-  if (fd_it == coroutine_fds_.end()) return;
-
-  int fd = fd_it->second;
-  auto waiting_it = waiting_fds_.find(fd);
-  if (waiting_it != waiting_fds_.end()) {
-    auto& list = waiting_it->second;
-    list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
-    if (list.empty()) {
-      waiting_fds_.erase(waiting_it);
+  if (fd_it != coroutine_fds_.end()) {
+    int fd = fd_it->second;
+    auto waiting_it = waiting_fds_.find(fd);
+    if (waiting_it != waiting_fds_.end()) {
+      auto& list = waiting_it->second;
+      list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
+      if (list.empty()) {
+        waiting_fds_.erase(waiting_it);
 #if CO_POLL_MODE == CO_POLL_EPOLL
-      if (epoll_fd_ != -1) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+        if (epoll_fd_ != -1) {
+          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+        }
+#endif
+      }
+    }
+
+    if (timerfds_.count(fd) > 0) {
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+      auto pt = posix_timers_.find(fd);
+      if (pt != posix_timers_.end()) {
+        struct itimerspec disarm = {};
+        timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+        timer_delete(pt->second.timer_id);
+        close(pt->second.write_fd);
+        posix_timers_.erase(pt);
       }
 #endif
+      close(fd);
+      timerfds_.erase(fd);
     }
+
+    coroutine_fds_.erase(fd_it);
   }
 
-  if (timerfds_.count(fd) > 0) {
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-    auto pt = posix_timers_.find(fd);
-    if (pt != posix_timers_.end()) {
-      struct itimerspec disarm = {};
-      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
-      timer_delete(pt->second.timer_id);
-      close(pt->second.write_fd);
-      posix_timers_.erase(pt);
-    }
+  // Also clean up interrupt FD waiting list.
+  int ifd = coroutine->GetInterruptFd();
+  if (ifd != -1) {
+    auto ifd_it = waiting_fds_.find(ifd);
+    if (ifd_it != waiting_fds_.end()) {
+      auto& ifd_list = ifd_it->second;
+      ifd_list.erase(std::remove(ifd_list.begin(), ifd_list.end(), coroutine),
+                     ifd_list.end());
+      if (ifd_list.empty()) {
+        waiting_fds_.erase(ifd_it);
+#if CO_POLL_MODE == CO_POLL_EPOLL
+        if (epoll_fd_ != -1) {
+          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ifd, nullptr);
+        }
 #endif
-    close(fd);
-    timerfds_.erase(fd);
+      }
+    }
   }
-
-  coroutine_fds_.erase(fd_it);
 }
 
 void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
@@ -229,7 +248,6 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
       if (ret == -1 && errno == EEXIST) {
         epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
       } else if (ret == -1 && errno == EBADF) {
-        // FD is invalid; schedule the coroutine with an error result.
         wait_list.erase(std::remove(wait_list.begin(), wait_list.end(), coroutine),
                         wait_list.end());
         if (wait_list.empty()) waiting_fds_.erase(fd);
@@ -238,10 +256,36 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
         coroutine->SetState(Coroutine::State::kReady);
         ready_queue_.push_back(coroutine);
         TriggerInterrupt();
+        return;
       }
     }
   }
 #endif
+
+  // Also register the coroutine's interrupt FD if present.
+  int ifd = coroutine->GetInterruptFd();
+  if (ifd != -1) {
+    bool ifd_already_tracked = waiting_fds_.count(ifd) > 0;
+    auto& ifd_list = waiting_fds_[ifd];
+    if (std::find(ifd_list.begin(), ifd_list.end(), coroutine) == ifd_list.end()) {
+      ifd_list.push_back(coroutine);
+    }
+#if CO_POLL_MODE == CO_POLL_EPOLL
+    if (epoll_fd_ != -1) {
+      struct epoll_event ev;
+      ev.data.fd = ifd;
+      ev.events = EPOLLIN;
+      if (ifd_already_tracked) {
+        epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, ifd, &ev);
+      } else {
+        int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, ifd, &ev);
+        if (ret == -1 && errno == EEXIST) {
+          epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, ifd, &ev);
+        }
+      }
+    }
+#endif
+  }
 }
 
 void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
@@ -373,6 +417,25 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
     }
   }
 
+  // Also detach from interrupt FD waiting list if present.
+  int ifd = coroutine->GetInterruptFd();
+  if (ifd != -1) {
+    auto ifd_it = waiting_fds_.find(ifd);
+    if (ifd_it != waiting_fds_.end()) {
+      auto& ifd_list = ifd_it->second;
+      ifd_list.erase(std::remove(ifd_list.begin(), ifd_list.end(), coroutine),
+                     ifd_list.end());
+      if (ifd_list.empty()) {
+        waiting_fds_.erase(ifd_it);
+#if CO_POLL_MODE == CO_POLL_EPOLL
+        if (epoll_fd_ != -1) {
+          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ifd, nullptr);
+        }
+#endif
+      }
+    }
+  }
+
   coroutine->SetWaitResult(value);
   coroutine->SetState(Coroutine::State::kReady);
   ready_queue_.push_back(coroutine);
@@ -390,7 +453,6 @@ void Scheduler::DispatchEpollEvents(struct epoll_event* events, int count) {
     }
     auto it = waiting_fds_.find(fd);
     if (it != waiting_fds_.end()) {
-      // Copy because ResumeCoroutine mutates the list.
       std::vector<Coroutine*> to_resume = it->second;
       for (Coroutine* c : to_resume) {
         ResumeCoroutine(c, fd);
@@ -414,8 +476,6 @@ void Scheduler::ProcessReadyCoroutines() {
 
     coroutine->Resume(coroutine->GetWaitResult());
 
-    // After resuming, poll for newly-ready FDs so we don't miss
-    // events caused by this coroutine's actions (e.g. writing to a pipe).
 #if CO_POLL_MODE == CO_POLL_EPOLL
     if (epoll_fd_ != -1 && !waiting_fds_.empty()) {
       struct epoll_event events[64];
