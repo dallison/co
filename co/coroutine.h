@@ -672,7 +672,7 @@ public:
 
   // Subclass can override this to provide custom behavior on coroutine
   // resumption.
-  virtual void OnResume(const Coroutine *c) {}
+  virtual void OnResume(const Coroutine *) {}
 
   int GetEpollFd() const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
