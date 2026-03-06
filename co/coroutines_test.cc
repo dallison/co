@@ -404,7 +404,6 @@ TEST(CoroutinesTest, AbortNestedShutdown) {
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
-  const co::Coroutine *c;
   scheduler.SetAbortOnStop(true);
   scheduler.Spawn([&scheduler, pipes]() {
     scheduler.Spawn([&scheduler]() {

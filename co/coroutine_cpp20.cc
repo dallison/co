@@ -265,7 +265,7 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
   // Also register the coroutine's interrupt FD if present.
   int ifd = coroutine->GetInterruptFd();
   if (ifd != -1) {
-    bool ifd_already_tracked = waiting_fds_.count(ifd) > 0;
+    [[maybe_unused]] bool ifd_already_tracked = waiting_fds_.count(ifd) > 0;
     auto& ifd_list = waiting_fds_[ifd];
     if (std::find(ifd_list.begin(), ifd_list.end(), coroutine) == ifd_list.end()) {
       ifd_list.push_back(coroutine);
