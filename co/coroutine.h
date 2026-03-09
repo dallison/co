@@ -1,4 +1,4 @@
-// Copyright 2023-2024 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
@@ -130,6 +130,7 @@
 #else
 #define CO_HAVE_VALGRIND 0
 #endif
+
 
 
 // Uncomment this if you want to see which context switcher is being used.
@@ -536,7 +537,7 @@ protected:
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
   mutable Context resume_;
   mutable Context exit_;
-  mutable int wait_result_;
+  mutable int wait_result_ = -1;  // Initialize to -1 to avoid garbage values
   mutable bool first_resume_ = true;
 
   // Abort handling.  If the scheduler has been configured to abort coroutines on stop.
