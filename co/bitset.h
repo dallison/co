@@ -56,10 +56,10 @@ private:
 };
 
 inline std::uint32_t BitSet::Allocate() {
-  std::uint32_t start = 0;
+  size_t start = 0;
   for (;;) {
     for (std::uint32_t i = start; i < bits_.size(); i++) {
-      std::uint32_t bit = static_cast<std::uint32_t>(ffsll(~bits_[i]));
+      size_t bit = static_cast<std::uint32_t>(ffsll(~bits_[i]));
       if (bit != 0) {
         bits_[i] |= (1LL << (bit - 1));
         return i * 64 + (bit - 1);
@@ -75,8 +75,8 @@ inline std::uint32_t BitSet::Allocate() {
 }
 
 inline void BitSet::Free(std::uint32_t bit) {
-  std::uint32_t word = bit / 64;
-  if (word < 0 || word >= bits_.size()) {
+  size_t word = bit / 64;
+  if (word >= bits_.size()) {
     return;
   }
   std::uint32_t b = bit % 64;
@@ -84,8 +84,8 @@ inline void BitSet::Free(std::uint32_t bit) {
 }
 
 inline void BitSet::Set(std::uint32_t bit) {
-  std::uint32_t word = bit / 64;
-  if (word < 0 || word >= bits_.size()) {
+  size_t word = bit / 64;
+  if (word >= bits_.size()) {
     return;
   }
   std::uint32_t b = bit % 64;
@@ -93,7 +93,7 @@ inline void BitSet::Set(std::uint32_t bit) {
 }
 
 inline bool BitSet::IsEmpty() const {
-  for (std::uint32_t i = 0; i < bits_.size(); i++) {
+  for (size_t i = 0; i < bits_.size(); i++) {
     if (bits_[i] != 0) {
       return false;
     }
@@ -102,11 +102,11 @@ inline bool BitSet::IsEmpty() const {
 }
 
 inline bool BitSet::Contains(std::uint32_t bit) const {
-  std::uint32_t word = bit / 64;
-  if (word < 0 || word >= bits_.size()) {
+  size_t word = bit / 64;
+  if (word >= bits_.size()) {
     return false;
   }
-  std::uint32_t b = bit % 64;
+  size_t b = bit % 64;
   return (bits_[word] & (1LL << b)) != 0;
 }
 } // namespace co

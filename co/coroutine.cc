@@ -346,7 +346,7 @@ void Coroutine::Start() {
 }
 
 
-int MakeTimer(const Coroutine *coroutine, uint64_t ns) {
+int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
 #if CO_TIMER_MODE == CO_TIMER_EVENT
   // macOS uses a kqueue.
   int kq = kqueue();
@@ -532,10 +532,10 @@ int Coroutine::Poll(const std::vector<int> &fds, short event_mask) const {
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size() + 1);
   for (auto &fd : fds) {
-    pfds.push_back({.fd = fd, .events = short(event_mask)});
+    pfds.push_back({.fd = fd, .events = short(event_mask), .revents = 0});
   }
   if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     pfds.push_back(ifd);
   }
   int ret = ::poll(pfds.data(), pfds.size(), 0);
@@ -555,7 +555,7 @@ int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
   // a simple check of the fd status.
   std::vector<struct pollfd> pfds = fds;
   if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     pfds.push_back(ifd);
   }
   int ret = ::poll(pfds.data(), pfds.size(), 0);
@@ -569,6 +569,7 @@ int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
   }
   return -1;
 }
+
 int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
@@ -664,10 +665,10 @@ int Coroutine::PollAndWait(const std::vector<WaitFd> &fds,
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size());
   for (auto &fd : fds) {
-    pfds.push_back({.fd = fd.fd, .events = short(fd.events)});
+    pfds.push_back({.fd = fd.fd, .events = short(fd.events), .revents = 0});
   }
   if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
+    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     pfds.push_back(ifd);
   }
   int n = Poll(pfds);

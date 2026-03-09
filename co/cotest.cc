@@ -137,7 +137,7 @@ void TestWaitWithTimeout(Coroutine *c) {
   close(trigger3_end);
 }
 
-int main(int argc, const char *argv[]) {
+int main() {
   (void)pipe(pipes);
 
   CoroutineScheduler sched;
