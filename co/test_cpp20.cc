@@ -631,6 +631,198 @@ TEST(Cpp20, InterruptFdDataFirst) {
 #endif
 }
 
+// --- ValueTask<T> tests ---
+
+ValueTask<int> AddAsync(Coroutine& co, int a, int b) {
+  co_await co.Yield();
+  co_return a + b;
+}
+
+TEST(Cpp20ValueTask, BasicReturn) {
+  Scheduler scheduler;
+  int result = 0;
+
+  scheduler.Spawn([&result](Coroutine& co) -> Task {
+    result = co_await AddAsync(co, 3, 4);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(7, result);
+}
+
+ValueTask<std::string> ReadFromPipeAsync(Coroutine& co, int read_fd) {
+  std::string data;
+  for (;;) {
+    int fd = co_await co.Wait(read_fd, POLLIN);
+    if (fd != read_fd) break;
+    char buf[64];
+    ssize_t n = read(read_fd, buf, sizeof(buf));
+    if (n <= 0) break;
+    data.append(buf, n);
+  }
+  co_return data;
+}
+
+TEST(Cpp20ValueTask, WithWait) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  std::string result;
+
+  scheduler.Spawn([&pipes, &result](Coroutine& co) -> Task {
+    result = co_await ReadFromPipeAsync(co, pipes[0]);
+    close(pipes[0]);
+    co_return;
+  }, "reader");
+
+  scheduler.Spawn([&pipes](Coroutine& co) -> Task {
+    co_await co.Yield();
+    const char* msg = "hello";
+    (void)write(pipes[1], msg, 5);
+    co_await co.Yield();
+    close(pipes[1]);
+    co_return;
+  }, "writer");
+
+  scheduler.Run();
+  EXPECT_EQ("hello", result);
+}
+
+ValueTask<int> InnerCompute(Coroutine& co, int x) {
+  co_await co.Yield();
+  co_return x * 2;
+}
+
+ValueTask<int> OuterCompute(Coroutine& co, int x) {
+  int doubled = co_await InnerCompute(co, x);
+  co_await co.Yield();
+  co_return doubled + 1;
+}
+
+TEST(Cpp20ValueTask, Nested) {
+  Scheduler scheduler;
+  int result = 0;
+
+  scheduler.Spawn([&result](Coroutine& co) -> Task {
+    result = co_await OuterCompute(co, 5);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(11, result);
+}
+
+ValueTask<void> IncrementAsync(Coroutine& co, int& counter) {
+  co_await co.Yield();
+  counter++;
+  co_return;
+}
+
+TEST(Cpp20ValueTask, VoidReturn) {
+  Scheduler scheduler;
+  int counter = 0;
+
+  scheduler.Spawn([&counter](Coroutine& co) -> Task {
+    co_await IncrementAsync(co, counter);
+    co_await IncrementAsync(co, counter);
+    co_await IncrementAsync(co, counter);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(3, counter);
+}
+
+ValueTask<void> WaitAndWrite(Coroutine& co, int write_fd) {
+  co_await co.Wait(write_fd, POLLOUT);
+  char c = 'V';
+  (void)write(write_fd, &c, 1);
+  co_return;
+}
+
+TEST(Cpp20ValueTask, VoidWithWait) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  char read_buf = 0;
+
+  scheduler.Spawn([&pipes, &read_buf](Coroutine& co) -> Task {
+    co_await WaitAndWrite(co, pipes[1]);
+    close(pipes[1]);
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    (void)fd;
+    (void)read(pipes[0], &read_buf, 1);
+    close(pipes[0]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ('V', read_buf);
+}
+
+ValueTask<int> AddWithFreeFunction(int a, int b) {
+  co_await co20::Yield();
+  co_return a + b;
+}
+
+TEST(Cpp20ValueTask, FreeFunctions) {
+  Scheduler scheduler;
+  int result = 0;
+
+  scheduler.Spawn([&result]() -> Task {
+    result = co_await AddWithFreeFunction(10, 20);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(30, result);
+}
+
+TEST(Cpp20ValueTask, MultipleSequentialCalls) {
+  Scheduler scheduler;
+  int sum = 0;
+
+  scheduler.Spawn([&sum](Coroutine& co) -> Task {
+    for (int i = 1; i <= 5; i++) {
+      sum += co_await AddAsync(co, i, 0);
+    }
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(15, sum);
+}
+
+ValueTask<bool> CheckPipeReady(Coroutine& co, int read_fd, uint64_t timeout_ns) {
+  int fd = co_await co.Wait(read_fd, POLLIN, timeout_ns);
+  co_return fd == read_fd;
+}
+
+TEST(Cpp20ValueTask, BoolReturn) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool pipe_ready = false;
+
+  scheduler.Spawn([&pipes, &pipe_ready](Coroutine& co) -> Task {
+    // Write data first so the pipe is ready.
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_await co.Yield();
+    pipe_ready = co_await CheckPipeReady(co, pipes[0], 0);
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_TRUE(pipe_ready);
+}
+
 } // namespace co20
 
 #endif // CO20_HAVE_COROUTINES
