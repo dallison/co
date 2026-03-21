@@ -823,6 +823,119 @@ TEST(Cpp20ValueTask, BoolReturn) {
   EXPECT_TRUE(pipe_ready);
 }
 
+TEST(Cpp20WaitTimeout, DataArrivesBeforeTimeout) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool success = false;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_await co.Yield();
+
+    int fd = co_await co.Wait(pipes[0], POLLIN, 1000000000ULL);
+    success = (fd == pipes[0]);
+
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_TRUE(success);
+}
+
+TEST(Cpp20WaitTimeout, TimeoutExpires) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool timed_out = false;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(pipes[0], POLLIN, 50000000ULL);
+    timed_out = (fd != pipes[0]);
+
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_TRUE(timed_out);
+}
+
+TEST(Cpp20WaitTimeout, FreeFunctionTimeout) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool timed_out = false;
+
+  scheduler.Spawn([&]() -> Task {
+    int fd = co_await co20::Wait(pipes[0], POLLIN, 50000000ULL);
+    timed_out = (fd != pipes[0]);
+
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_TRUE(timed_out);
+}
+
+TEST(Cpp20WaitTimeout, ValueTaskWithTimeout) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool result = true;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    result = co_await CheckPipeReady(co, pipes[0], 50000000ULL);
+
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_FALSE(result);
+}
+
+TEST(Cpp20WaitTimeout, DataArrivesDuringWait) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool success = false;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    // Spawn a helper that writes after a short delay.
+    co_await co.Yield();
+
+    int fd = co_await co.Wait(pipes[0], POLLIN, 500000000ULL);
+    success = (fd == pipes[0]);
+
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "waiter");
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Sleep(std::chrono::milliseconds(20));
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  scheduler.Run();
+  EXPECT_TRUE(success);
+}
+
 } // namespace co20
 
 #endif // CO20_HAVE_COROUTINES

@@ -160,6 +160,8 @@ private:
   void SetState(State state) { state_ = state; }
   void SetWaitResult(int result) { wait_result_ = result; }
   int GetWaitResult() const { return wait_result_; }
+  void SetTimeoutFd(int fd) { timeout_fd_ = fd; }
+  int GetTimeoutFd() const { return timeout_fd_; }
 
   inline void Resume(int value = 0);
 
@@ -171,6 +173,7 @@ private:
   int id_;
   int wait_result_ = -1;
   int interrupt_fd_ = -1;
+  int timeout_fd_ = -1;
   // Holds the callable (e.g. lambda) that produced the coroutine, keeping
   // its captures alive for the lifetime of the coroutine frame.
   std::shared_ptr<void> callable_storage_;
@@ -210,6 +213,7 @@ private:
   void ProcessReadyCoroutines();
   void ProcessEvents();
   void CleanupCoroutine(Coroutine* coroutine);
+  void CleanupTimeoutFd(Coroutine* coroutine);
   void TriggerInterrupt();
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void DispatchEpollEvents(struct epoll_event* events, int count);

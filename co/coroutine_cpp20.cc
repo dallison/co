@@ -183,10 +183,12 @@ void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
       }
     }
   }
+
+  CleanupTimeoutFd(coroutine);
 }
 
 void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
-                           uint64_t /*timeout_ns*/) {
+                           uint64_t timeout_ns) {
   if (!coroutine) return;
 
   // If already ready, schedule immediately.
@@ -282,6 +284,104 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
         if (ret == -1 && errno == EEXIST) {
           epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, ifd, &ev);
         }
+      }
+    }
+#endif
+  }
+
+  // Set up timeout timer if requested.
+  if (timeout_ns > 0) {
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd != -1) {
+      struct itimerspec its = {};
+      its.it_value.tv_sec = timeout_ns / 1000000000ULL;
+      its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
+      timerfd_settime(tfd, 0, &its, nullptr);
+
+      timerfds_.insert(tfd);
+      coroutine->SetTimeoutFd(tfd);
+
+      auto& timer_wait_list = waiting_fds_[tfd];
+      timer_wait_list.push_back(coroutine);
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+      if (epoll_fd_ != -1) {
+        struct epoll_event tev;
+        tev.data.fd = tfd;
+        tev.events = EPOLLIN;
+        int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, tfd, &tev);
+        if (ret == -1 && errno == EEXIST) {
+          epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, tfd, &tev);
+        }
+      }
+#endif
+    }
+
+#elif CO_TIMER_MODE == CO_TIMER_EVENT
+    int kq = kqueue();
+    if (kq != -1) {
+      timerfds_.insert(kq);
+      coroutine->SetTimeoutFd(kq);
+
+      struct kevent kev;
+      EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS,
+             timeout_ns, 0);
+      kevent(kq, &kev, 1, nullptr, 0, nullptr);
+
+      auto& timer_wait_list = waiting_fds_[kq];
+      timer_wait_list.push_back(coroutine);
+    }
+
+#elif CO_TIMER_MODE == CO_TIMER_POSIX
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == 0) {
+      int read_fd = pipe_fds[0];
+      int write_fd = pipe_fds[1];
+      fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL, 0) | O_NONBLOCK);
+      fcntl(write_fd, F_SETFL, fcntl(write_fd, F_GETFL, 0) | O_NONBLOCK);
+
+      struct sigevent se = {};
+      se.sigev_notify = SIGEV_THREAD;
+      se.sigev_notify_attributes = nullptr;
+      se.sigev_value.sival_int = write_fd;
+      se.sigev_notify_function = [](union sigval sv) {
+        char c = 1;
+        (void)write(sv.sival_int, &c, 1);
+      };
+
+      timer_t timer_id;
+      if (timer_create(CLOCK_REALTIME, &se, &timer_id) == 0) {
+        struct itimerspec its = {};
+        its.it_value.tv_sec = timeout_ns / 1000000000ULL;
+        its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
+        if (timer_settime(timer_id, 0, &its, nullptr) == 0) {
+          timerfds_.insert(read_fd);
+          posix_timers_[read_fd] = {timer_id, write_fd};
+          coroutine->SetTimeoutFd(read_fd);
+
+          auto& timer_wait_list = waiting_fds_[read_fd];
+          timer_wait_list.push_back(coroutine);
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+          if (epoll_fd_ != -1) {
+            struct epoll_event tev;
+            tev.data.fd = read_fd;
+            tev.events = EPOLLIN;
+            int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, read_fd, &tev);
+            if (ret == -1 && errno == EEXIST) {
+              epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, read_fd, &tev);
+            }
+          }
+#endif
+        } else {
+          timer_delete(timer_id);
+          close(read_fd);
+          close(write_fd);
+        }
+      } else {
+        close(read_fd);
+        close(write_fd);
       }
     }
 #endif
@@ -436,10 +536,52 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
     }
   }
 
+  // Clean up timeout timer fd if present.
+  CleanupTimeoutFd(coroutine);
+
   coroutine->SetWaitResult(value);
   coroutine->SetState(Coroutine::State::kReady);
   ready_queue_.push_back(coroutine);
   TriggerInterrupt();
+}
+
+void Scheduler::CleanupTimeoutFd(Coroutine* coroutine) {
+  int tfd = coroutine->GetTimeoutFd();
+  if (tfd == -1) return;
+
+  auto tfd_it = waiting_fds_.find(tfd);
+  if (tfd_it != waiting_fds_.end()) {
+    auto& list = tfd_it->second;
+    list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
+    if (list.empty()) {
+      waiting_fds_.erase(tfd_it);
+#if CO_POLL_MODE == CO_POLL_EPOLL
+      if (epoll_fd_ != -1) {
+        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, tfd, nullptr);
+      }
+#endif
+    }
+  }
+
+  if (timerfds_.count(tfd) > 0) {
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
+    uint64_t val;
+    (void)read(tfd, &val, sizeof(val));
+#elif CO_TIMER_MODE == CO_TIMER_POSIX
+    auto pt = posix_timers_.find(tfd);
+    if (pt != posix_timers_.end()) {
+      struct itimerspec disarm = {};
+      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+      timer_delete(pt->second.timer_id);
+      close(pt->second.write_fd);
+      posix_timers_.erase(pt);
+    }
+#endif
+    close(tfd);
+    timerfds_.erase(tfd);
+  }
+
+  coroutine->SetTimeoutFd(-1);
 }
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
