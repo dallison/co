@@ -100,6 +100,7 @@ struct BaseAwaitable;
 struct YieldAwaitable;
 struct WaitAwaitable;
 struct SleepAwaitable;
+template <typename T> struct ValueTask;
 
 // Represents a single C++20 stackless coroutine managed by a Scheduler.
 class Coroutine {
@@ -119,6 +120,7 @@ public:
   friend struct WaitAwaitable;
   friend struct SleepAwaitable;
   friend struct Task;
+  template <typename T> friend struct ValueTask;
 
   template<typename Func>
   Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "",
@@ -158,6 +160,8 @@ private:
   void SetState(State state) { state_ = state; }
   void SetWaitResult(int result) { wait_result_ = result; }
   int GetWaitResult() const { return wait_result_; }
+  void SetTimeoutFd(int fd) { timeout_fd_ = fd; }
+  int GetTimeoutFd() const { return timeout_fd_; }
 
   inline void Resume(int value = 0);
 
@@ -169,6 +173,10 @@ private:
   int id_;
   int wait_result_ = -1;
   int interrupt_fd_ = -1;
+  int timeout_fd_ = -1;
+  // Holds the callable (e.g. lambda) that produced the coroutine, keeping
+  // its captures alive for the lifetime of the coroutine frame.
+  std::shared_ptr<void> callable_storage_;
 };
 
 // Manages a set of coroutines, scheduling them cooperatively using
@@ -205,6 +213,7 @@ private:
   void ProcessReadyCoroutines();
   void ProcessEvents();
   void CleanupCoroutine(Coroutine* coroutine);
+  void CleanupTimeoutFd(Coroutine* coroutine);
   void TriggerInterrupt();
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void DispatchEpollEvents(struct epoll_event* events, int count);
@@ -356,11 +365,18 @@ inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string
     interrupt_fd_(interrupt_fd == -1 ? -1 : dup(interrupt_fd)) {
   name_ = name.empty() ? "co-" + std::to_string(id_) : name;
 
+  // Store the callable so its captures (e.g. lambda captures) remain alive
+  // for the lifetime of the coroutine. C++20 coroutine frames hold a pointer
+  // to the callable's captures, so the callable must outlive the frame.
+  using FuncType = std::decay_t<Func>;
+  auto stored = std::make_shared<FuncType>(std::forward<Func>(func));
+  callable_storage_ = stored;
+
   auto task = [&]() {
-    if constexpr (std::is_invocable_v<Func, Coroutine&>) {
-      return func(*this);
+    if constexpr (std::is_invocable_v<FuncType, Coroutine&>) {
+      return (*stored)(*this);
     } else {
-      return func();
+      return (*stored)();
     }
   }();
   if constexpr (requires { task.handle_; }) {
@@ -394,6 +410,14 @@ inline SleepAwaitable Coroutine::Sleep(std::chrono::duration<Rep, Period> durati
   auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
   return Sleep(static_cast<uint64_t>(ns));
 }
+
+// Thread-local pointers to the currently running coroutine and its scheduler.
+// These are set automatically by the scheduler before each coroutine is resumed,
+// enabling the free functions below. Each thread running a scheduler gets its
+// own copy. Declared here (before Task/ValueTask) so that ValueTask::await_resume
+// can reference co20::self to restore the Coroutine's handle tracking.
+extern thread_local Coroutine* self;
+extern thread_local Scheduler* scheduler;
 
 // Task type returned by coroutine functions: [](Coroutine& co) -> Task { ... }
 struct Task {
@@ -437,12 +461,144 @@ struct Task {
   Task(Task&& other) noexcept : handle_(other.handle_) { other.handle_ = {}; }
 };
 
-// Thread-local pointers to the currently running coroutine and its scheduler.
-// These are set automatically by the scheduler before each coroutine is resumed,
-// enabling the free functions below. Each thread running a scheduler gets its
-// own copy.
-extern thread_local Coroutine* self;
-extern thread_local Scheduler* scheduler;
+// A sub-coroutine that produces a value of type T. Unlike Task (which is
+// managed by the Scheduler), ValueTask<T> is designed to be co_await'ed from
+// within a Task or another ValueTask. It uses symmetric transfer to run inline
+// with the caller, sharing the same Scheduler and Coroutine context.
+//
+// Usage:
+//   ValueTask<int> ComputeAsync(Coroutine& co) {
+//     co_await co.Wait(fd, POLLIN);
+//     co_return 42;
+//   }
+//
+//   // From within a Task:
+//   int result = co_await ComputeAsync(co);
+template <typename T>
+struct ValueTask {
+  struct promise_type {
+    T value_{};
+    std::coroutine_handle<> continuation_{};
+
+    std::suspend_always initial_suspend() noexcept { return {}; }
+
+    struct FinalAwaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<> await_suspend(
+          std::coroutine_handle<promise_type> h) const noexcept {
+        if (auto cont = h.promise().continuation_; cont)
+          return cont;
+        return std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    FinalAwaiter final_suspend() noexcept { return {}; }
+    void unhandled_exception() {}
+
+    ValueTask get_return_object() {
+      return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    template <typename U>
+    void return_value(U&& v) { value_ = std::forward<U>(v); }
+  };
+
+  std::coroutine_handle<promise_type> handle_;
+
+  explicit ValueTask(std::coroutine_handle<promise_type> h) : handle_(h) {}
+  ~ValueTask() { if (handle_) handle_.destroy(); }
+
+  ValueTask(const ValueTask&) = delete;
+  ValueTask& operator=(const ValueTask&) = delete;
+  ValueTask(ValueTask&& o) noexcept : handle_(o.handle_) { o.handle_ = {}; }
+  ValueTask& operator=(ValueTask&& o) noexcept {
+    if (this != &o) {
+      if (handle_) handle_.destroy();
+      handle_ = o.handle_;
+      o.handle_ = {};
+    }
+    return *this;
+  }
+
+  // Awaitable interface for co_await.
+  bool await_ready() const noexcept { return false; }
+
+  std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) const noexcept {
+    handle_.promise().continuation_ = caller;
+    return handle_;
+  }
+
+  T await_resume() {
+    // Restore the Coroutine's handle to point to the caller (continuation)
+    // before this ValueTask is destroyed, preventing a dangling handle.
+    if (co20::self && handle_.promise().continuation_) {
+      co20::self->SetHandle(handle_.promise().continuation_);
+    }
+    return std::move(handle_.promise().value_);
+  }
+};
+
+// Void specialization of ValueTask for sub-coroutines that don't return a
+// value but still need to co_await internally.
+template <>
+struct ValueTask<void> {
+  struct promise_type {
+    std::coroutine_handle<> continuation_{};
+
+    std::suspend_always initial_suspend() noexcept { return {}; }
+
+    struct FinalAwaiter {
+      bool await_ready() const noexcept { return false; }
+      std::coroutine_handle<> await_suspend(
+          std::coroutine_handle<promise_type> h) const noexcept {
+        if (auto cont = h.promise().continuation_; cont)
+          return cont;
+        return std::noop_coroutine();
+      }
+      void await_resume() const noexcept {}
+    };
+
+    FinalAwaiter final_suspend() noexcept { return {}; }
+    void unhandled_exception() {}
+
+    ValueTask get_return_object() {
+      return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    void return_void() {}
+  };
+
+  std::coroutine_handle<promise_type> handle_;
+
+  explicit ValueTask(std::coroutine_handle<promise_type> h) : handle_(h) {}
+  ~ValueTask() { if (handle_) handle_.destroy(); }
+
+  ValueTask(const ValueTask&) = delete;
+  ValueTask& operator=(const ValueTask&) = delete;
+  ValueTask(ValueTask&& o) noexcept : handle_(o.handle_) { o.handle_ = {}; }
+  ValueTask& operator=(ValueTask&& o) noexcept {
+    if (this != &o) {
+      if (handle_) handle_.destroy();
+      handle_ = o.handle_;
+      o.handle_ = {};
+    }
+    return *this;
+  }
+
+  bool await_ready() const noexcept { return false; }
+
+  std::coroutine_handle<> await_suspend(std::coroutine_handle<> caller) const noexcept {
+    handle_.promise().continuation_ = caller;
+    return handle_;
+  }
+
+  void await_resume() const {
+    if (co20::self && handle_.promise().continuation_) {
+      co20::self->SetHandle(handle_.promise().continuation_);
+    }
+  }
+};
 
 // --- Coroutine::Resume (needs thread_local declarations above) ---
 
