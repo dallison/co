@@ -110,7 +110,7 @@ TEST(Cpp20, Loop) {
   
   // Create 10 coroutines, each yielding 10 times
   for (int i = 0; i < 10; i++) {
-    scheduler.Spawn([i](Coroutine& co) -> Task {
+    scheduler.Spawn([](Coroutine& co) -> Task {
       for (int j = 0; j < 10; j++) {
         co_await co.Yield();
       }
@@ -487,9 +487,11 @@ TEST(Cpp20, InterruptFd) {
     co_return;
   }, "waiting", efd);
 
-  scheduler.Spawn([&efd
-#if !defined(__linux__)
-    , &p
+  scheduler.Spawn([
+#if defined(__linux__)
+    &efd
+#else
+    &p
 #endif
     ](Coroutine& co) -> Task {
     co_await co.Sleep(50000000ULL); // 50ms
@@ -547,9 +549,11 @@ TEST(Cpp20, InterruptFdWithFreeFunction) {
     co_return;
   }, "waiting", efd);
 
-  scheduler.Spawn([&efd
-#if !defined(__linux__)
-    , &p
+  scheduler.Spawn([
+#if defined(__linux__)
+    &efd
+#else
+    &p
 #endif
     ](Coroutine& co) -> Task {
     co_await co.Sleep(50000000ULL);
