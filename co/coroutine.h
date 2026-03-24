@@ -621,6 +621,8 @@ struct PollState {
   std::vector<Coroutine *> coroutines;
 };
 
+class SignalCatcher; // Forward declaration.
+
 class CoroutineScheduler {
 public:
   CoroutineScheduler();
@@ -690,6 +692,10 @@ public:
 
   std::vector<int> GetAllFds() const;
 
+  using SignalHandler = std::function<void(int, CoroutineScheduler&)>;
+  void AddSignalHandler(int signum, SignalHandler handler_callback);
+  void RemoveSignalHandler(int signum);
+
   co::Coroutine *Spawn(std::function<void(co::Coroutine *)> f,
                        CoroutineOptions opts = {});
   co::Coroutine *Spawn(std::function<void()> f, CoroutineOptions opts = {});
@@ -734,6 +740,8 @@ protected:
   struct pollfd interrupt_fd_ = {-1, POLLIN, 0};
   struct pollfd co_interrupt_fd_ = {-1, POLLIN, 0};
 #endif
+
+  std::unique_ptr<SignalCatcher> signal_catcher_;
 
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
