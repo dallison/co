@@ -1,9 +1,10 @@
 package(default_visibility = ["//visibility:public"])
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 
 cc_binary(
     name = "http_server",
     srcs = ["main.cc"],
     deps = [
-        "//:co",
+        "//co:co",
     ]
 )

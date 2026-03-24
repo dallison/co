@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-#include "coroutine.h"
+#include "co/coroutine.h"
 
 using namespace co;
 
@@ -15,7 +15,7 @@ void Test(Coroutine *c) {
   }
 }
 
-int main(int argc, char **argv) {
+int main() {
   CoroutineScheduler scheduler;
   std::vector<std::unique_ptr<Coroutine>> coroutines;
   for (int i = 0; i < 1000; i++) {

@@ -1,11 +1,11 @@
-// Copyright 2023 David Allison
+// Copyright 2023-2026 David Allison
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
 #include <stdio.h>
 #include <unistd.h>
 
-#include "coroutine.h"
+#include "co/coroutine.h"
 
 using namespace co;
 
@@ -137,7 +137,7 @@ void TestWaitWithTimeout(Coroutine *c) {
   close(trigger3_end);
 }
 
-int main(int argc, const char *argv[]) {
+int main() {
   (void)pipe(pipes);
 
   CoroutineScheduler sched;
