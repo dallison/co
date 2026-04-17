@@ -229,7 +229,7 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
   }
 
   // Add coroutine to waiting list for this FD.
-  bool fd_already_tracked = waiting_fds_.count(fd) > 0;
+  [[maybe_unused]] bool fd_already_tracked = waiting_fds_.count(fd) > 0;
   auto& wait_list = waiting_fds_[fd];
   if (std::find(wait_list.begin(), wait_list.end(), coroutine) == wait_list.end()) {
     wait_list.push_back(coroutine);
