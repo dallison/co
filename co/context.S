@@ -11,7 +11,9 @@
 #define SYM_DATA(name) .p2align 2
 .section        __TEXT,__text,regular,pure_instructions
 
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__QNX__) || defined(__QNXNTO__)
+// QNX uses ELF and the same GNU-as syntax as Linux for symbol decoration,
+// so the same directives work for both.
 .text
 #define SYM(name) #name
 #define SYM_DATA(name) .type SYM(name), @function

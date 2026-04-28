@@ -13,6 +13,8 @@
 #include <cassert>
 #include <fcntl.h>
 #include <iostream>
+#include <mutex>
+#include <unordered_map>
 
 #include "bitset.h"
 
@@ -77,6 +79,23 @@ namespace co {
 
 struct AbortException {};
 
+#if !defined(__APPLE__) && !defined(__linux__)
+// Portable fallback used on systems that have neither macOS kqueue nor Linux
+// eventfd (e.g. QNX).  We synthesize an "event fd" with a regular pipe: the
+// read end is the fd that callers see, and we keep the write end in a side
+// table so Trigger/Clear can use it.  This adds no dependencies beyond POSIX.
+namespace {
+std::mutex &EventFdMapMutex() {
+  static std::mutex m;
+  return m;
+}
+std::unordered_map<int, int> &EventFdMap() {
+  static std::unordered_map<int, int> m;
+  return m;
+}
+} // namespace
+#endif
+
 static int NewEventFd() {
   int event_fd;
 #if defined(__APPLE__)
@@ -84,7 +103,21 @@ static int NewEventFd() {
 #elif defined(__linux__)
   event_fd = eventfd(0, EFD_NONBLOCK);
 #else
-#error "Unknown operating system"
+  int pipefd[2];
+  if (::pipe(pipefd) == -1) {
+    return -1;
+  }
+  for (int i = 0; i < 2; ++i) {
+    int flags = fcntl(pipefd[i], F_GETFL, 0);
+    if (flags != -1) {
+      (void)fcntl(pipefd[i], F_SETFL, flags | O_NONBLOCK);
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(EventFdMapMutex());
+    EventFdMap()[pipefd[0]] = pipefd[1];
+  }
+  event_fd = pipefd[0];
 #endif
   return event_fd;
 }
@@ -93,6 +126,20 @@ static void CloseEventFd(int fd) {
   if (fd == -1) {
     return;
   }
+#if !defined(__APPLE__) && !defined(__linux__)
+  int write_fd = -1;
+  {
+    std::lock_guard<std::mutex> lock(EventFdMapMutex());
+    auto it = EventFdMap().find(fd);
+    if (it != EventFdMap().end()) {
+      write_fd = it->second;
+      EventFdMap().erase(it);
+    }
+  }
+  if (write_fd != -1) {
+    close(write_fd);
+  }
+#endif
   close(fd);
 }
 
@@ -105,7 +152,18 @@ static void TriggerEvent(int fd) {
   int64_t val = 1;
   (void)write(fd, &val, 8);
 #else
-#error "Unknown operating system"
+  int write_fd = -1;
+  {
+    std::lock_guard<std::mutex> lock(EventFdMapMutex());
+    auto it = EventFdMap().find(fd);
+    if (it != EventFdMap().end()) {
+      write_fd = it->second;
+    }
+  }
+  if (write_fd != -1) {
+    char ch = 'x';
+    (void)write(write_fd, &ch, 1);
+  }
 #endif
 }
 
@@ -118,7 +176,10 @@ static void ClearEvent(int fd) {
   int64_t val;
   (void)read(fd, &val, 8);
 #else
-#error "Unknown operating system"
+  // Drain the read end of the pipe.
+  char buf[64];
+  while (::read(fd, buf, sizeof(buf)) > 0) {
+  }
 #endif
 }
 
