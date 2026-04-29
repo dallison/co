@@ -134,8 +134,8 @@ static size_t ReadContents(co::Coroutine *c, int fd, std::string &buffer,
     if (i < buffer.size()) {
       // Data remaining in buffer
       size_t nbytes = buffer.size() - i;
-      if (nbytes > length) {
-        nbytes = length;
+      if (nbytes > static_cast<size_t>(length)) {
+        nbytes = static_cast<size_t>(length);
       }
       if (write_to_output) {
         fwrite(&buffer[i], 1, nbytes, stdout);

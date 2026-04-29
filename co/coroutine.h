@@ -236,6 +236,51 @@ struct YieldedCoroutine {
   uint32_t events = 0;
 };
 
+// EventFd is a portable representation of a triggerable file descriptor used
+// to wake up coroutines.  On Linux it wraps an eventfd; on macOS it wraps a
+// kqueue (with an EVFILT_USER filter); on other systems it is implemented as
+// a non-blocking pipe pair.  In all cases:
+//
+//   - poll_fd    is the file descriptor that should be added to a poll/epoll
+//                set.  It becomes readable when the event is triggered.
+//   - trigger_fd is the file descriptor that should be written to in order to
+//                signal the event.  On Linux/macOS it is the same fd as
+//                poll_fd; on systems backed by a pipe it is the write end of
+//                the pipe.
+//
+// This is functionally equivalent to toolbelt::TriggerFd but is self-contained
+// to avoid a circular dependency on cpp_toolbelt.
+struct EventFd {
+  int poll_fd = -1;
+  int trigger_fd = -1;
+
+  bool IsValid() const { return poll_fd != -1; }
+
+  // Trigger the event so that anything polling poll_fd will wake up.
+  void Trigger() const;
+
+  // Drain a previously triggered event (no-op if not triggered).
+  void Clear() const;
+
+  // Close any owned file descriptors and reset to the invalid state.
+  void Close();
+
+  // Reset to the invalid state without closing any file descriptors.
+  void Reset() {
+    poll_fd = -1;
+    trigger_fd = -1;
+  }
+
+  // Allocate a new event fd suitable for general signalling.  Returns an
+  // invalid EventFd (IsValid() == false) on failure.
+  static EventFd Create();
+
+  // Allocate a new event fd suitable for use as an abort signal.  On Linux
+  // this is an eventfd with EFD_CLOEXEC set; on other platforms it behaves
+  // identically to Create().
+  static EventFd CreateAbort();
+};
+
 struct CoroutineOptions {
   std::string name;
   int interrupt_fd = -1;
@@ -546,16 +591,20 @@ protected:
   // Aborting a coroutine causes it to correctly terminate its execution function, unwinding
   // the stack and calling destructors.  It is a clean way to terminate a coroutine without
   // having to use an interrupt fd and check for termination in the coroutine function.
-  mutable int abort_fd_ = -1;
+  mutable EventFd abort_fd_;
   mutable bool abort_pending_ = false;    // Coroutine::Abort called.
   mutable bool aborted_ = false;      // Abort has been processed.
+
+  // Event fd used to wake this coroutine up.  The scheduler waits on
+  // event_fd_.poll_fd; TriggerEvent()/ClearEvent() write/read via the
+  // EventFd's trigger_fd/poll_fd as appropriate.
+  mutable EventFd event_fd_;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   mutable YieldedCoroutine yield_fd_;
   mutable std::vector<YieldedCoroutine> wait_fds_;
   mutable int num_epoll_events_ = 0;
 #else
-  mutable struct pollfd event_fd_; // Pollfd for event.
   mutable std::vector<struct pollfd>
       wait_fds_; // Pollfds for waiting for an fd.
 #endif
@@ -639,13 +688,7 @@ public:
   void RemoveCoroutine(const Coroutine *c);
   void StartCoroutine(Coroutine *c);
 
-  int GetInterruptFd() const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    return co_interrupt_fd_;
-#else
-    return co_interrupt_fd_.fd;
-#endif
-  }
+  int GetInterruptFd() const { return co_interrupt_fd_.poll_fd; }
 
   void TriggerInterrupt() const;
 
@@ -726,14 +769,12 @@ protected:
   absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
       waiting_coroutines_;
   int epoll_fd_ = -1;
-  int interrupt_fd_ = -1;
-  int co_interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
 #else
   PollState poll_state_;
-  struct pollfd interrupt_fd_ = {-1, POLLIN, 0};
-  struct pollfd co_interrupt_fd_ = {-1, POLLIN, 0};
 #endif
+  EventFd interrupt_fd_;
+  EventFd co_interrupt_fd_;
 
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;

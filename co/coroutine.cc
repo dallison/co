@@ -13,8 +13,6 @@
 #include <cassert>
 #include <fcntl.h>
 #include <iostream>
-#include <mutex>
-#include <unordered_map>
 
 #include "bitset.h"
 
@@ -80,32 +78,15 @@ namespace co {
 struct AbortException {};
 
 #if !defined(__APPLE__) && !defined(__linux__)
-// Portable fallback used on systems that have neither macOS kqueue nor Linux
-// eventfd (e.g. QNX).  We synthesize an "event fd" with a regular pipe: the
-// read end is the fd that callers see, and we keep the write end in a side
-// table so Trigger/Clear can use it.  This adds no dependencies beyond POSIX.
 namespace {
-std::mutex &EventFdMapMutex() {
-  static std::mutex m;
-  return m;
-}
-std::unordered_map<int, int> &EventFdMap() {
-  static std::unordered_map<int, int> m;
-  return m;
-}
-} // namespace
-#endif
 
-static int NewEventFd() {
-  int event_fd;
-#if defined(__APPLE__)
-  event_fd = kqueue();
-#elif defined(__linux__)
-  event_fd = eventfd(0, EFD_NONBLOCK);
-#else
+// Allocate a non-blocking pipe pair, returning {read_fd, write_fd} or
+// {-1, -1} on failure.  Used as the portable fallback for EventFd on systems
+// that have neither Linux eventfd nor macOS kqueue.
+std::pair<int, int> MakeNonBlockingPipe() {
   int pipefd[2];
   if (::pipe(pipefd) == -1) {
-    return -1;
+    return {-1, -1};
   }
   for (int i = 0; i < 2; ++i) {
     int flags = fcntl(pipefd[i], F_GETFL, 0);
@@ -113,74 +94,115 @@ static int NewEventFd() {
       (void)fcntl(pipefd[i], F_SETFL, flags | O_NONBLOCK);
     }
   }
-  {
-    std::lock_guard<std::mutex> lock(EventFdMapMutex());
-    EventFdMap()[pipefd[0]] = pipefd[1];
-  }
-  event_fd = pipefd[0];
-#endif
-  return event_fd;
+  return {pipefd[0], pipefd[1]};
 }
 
-static void CloseEventFd(int fd) {
+} // namespace
+#endif
+
+EventFd EventFd::Create() {
+  EventFd e;
+#if defined(__APPLE__)
+  int fd = kqueue();
   if (fd == -1) {
+    return e;
+  }
+  e.poll_fd = fd;
+  e.trigger_fd = fd;
+#elif defined(__linux__)
+  int fd = eventfd(0, EFD_NONBLOCK);
+  if (fd == -1) {
+    return e;
+  }
+  e.poll_fd = fd;
+  e.trigger_fd = fd;
+#else
+  auto pipefd = MakeNonBlockingPipe();
+  if (pipefd.first == -1) {
+    return e;
+  }
+  e.poll_fd = pipefd.first;
+  e.trigger_fd = pipefd.second;
+#endif
+  return e;
+}
+
+EventFd EventFd::CreateAbort() {
+  EventFd e;
+#if defined(__APPLE__)
+  int kq = kqueue();
+  if (kq == -1) {
+    return e;
+  }
+  // Pre-register the EVFILT_USER filter so that Trigger() can fire it.
+  struct kevent ev;
+  EV_SET(&ev, 1, EVFILT_USER, EV_ADD, NOTE_ABSOLUTE, 0, 0);
+  kevent(kq, &ev, 1, NULL, 0, NULL);
+  e.poll_fd = kq;
+  e.trigger_fd = kq;
+#elif defined(__linux__)
+  int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (fd == -1) {
+    return e;
+  }
+  e.poll_fd = fd;
+  e.trigger_fd = fd;
+#else
+  auto pipefd = MakeNonBlockingPipe();
+  if (pipefd.first == -1) {
+    return e;
+  }
+  e.poll_fd = pipefd.first;
+  e.trigger_fd = pipefd.second;
+#endif
+  return e;
+}
+
+void EventFd::Trigger() const {
+  if (trigger_fd == -1) {
     return;
   }
-#if !defined(__APPLE__) && !defined(__linux__)
-  int write_fd = -1;
-  {
-    std::lock_guard<std::mutex> lock(EventFdMapMutex());
-    auto it = EventFdMap().find(fd);
-    if (it != EventFdMap().end()) {
-      write_fd = it->second;
-      EventFdMap().erase(it);
-    }
-  }
-  if (write_fd != -1) {
-    close(write_fd);
-  }
-#endif
-  close(fd);
-}
-
-static void TriggerEvent(int fd) {
 #if defined(__APPLE__)
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, 0, 0, 0); // Trigger USER event
+  kevent(trigger_fd, &e, 1, 0, 0, 0);
 #elif defined(__linux__)
   int64_t val = 1;
-  (void)write(fd, &val, 8);
+  (void)write(trigger_fd, &val, 8);
 #else
-  int write_fd = -1;
-  {
-    std::lock_guard<std::mutex> lock(EventFdMapMutex());
-    auto it = EventFdMap().find(fd);
-    if (it != EventFdMap().end()) {
-      write_fd = it->second;
-    }
+  char ch = 'x';
+  (void)write(trigger_fd, &ch, 1);
+#endif
+}
+
+void EventFd::Clear() const {
+  if (poll_fd == -1) {
+    return;
   }
-  if (write_fd != -1) {
-    char ch = 'x';
-    (void)write(write_fd, &ch, 1);
+#if defined(__APPLE__)
+  struct kevent e;
+  EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
+  kevent(poll_fd, &e, 1, nullptr, 0, 0);
+#elif defined(__linux__)
+  int64_t val;
+  (void)read(poll_fd, &val, 8);
+#else
+  // Drain the read end of the pipe.
+  char buf[64];
+  while (::read(poll_fd, buf, sizeof(buf)) > 0) {
   }
 #endif
 }
 
-static void ClearEvent(int fd) {
-#if defined(__APPLE__)
-  struct kevent e;
-  EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
-  kevent(fd, &e, 1, nullptr, 0, 0); // Clear USER event
-#elif defined(__linux__)
-  int64_t val;
-  (void)read(fd, &val, 8);
-#else
-  // Drain the read end of the pipe.
-  char buf[64];
-  while (::read(fd, buf, sizeof(buf)) > 0) {
+void EventFd::Close() {
+  if (trigger_fd != -1 && trigger_fd != poll_fd) {
+    ::close(trigger_fd);
   }
-#endif
+  if (poll_fd != -1) {
+    ::close(poll_fd);
+  }
+  poll_fd = -1;
+  trigger_fd = -1;
 }
 
 #if CO_CTX_MODE == CO_CTX_SETJMP
@@ -278,20 +300,13 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
       stack_.data(), static_cast<char *>(stack_.data()) + stack_.size());
 #endif
 
+  event_fd_ = EventFd::Create();
+  if (!event_fd_.IsValid()) {
+    fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
+    abort();
+  }
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  int efd = NewEventFd();
-  if (efd == -1) {
-    fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
-    abort();
-  }
-  yield_fd_ = YieldedCoroutine(this, efd, EPOLLIN);
-#else
-  event_fd_.fd = NewEventFd();
-  if (event_fd_.fd == -1) {
-    fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
-    abort();
-  }
-  event_fd_.events = POLLIN;
+  yield_fd_ = YieldedCoroutine(this, event_fd_.poll_fd, EPOLLIN);
 #endif
 
   // Might as well take the hit for allocating the pollfd vector when the
@@ -307,14 +322,8 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
 }
 
 Coroutine::~Coroutine() {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  CloseEventFd(yield_fd_.fd);
-#else
-  CloseEventFd(event_fd_.fd);
-#endif
-  if (abort_fd_ != -1) {
-    CloseEventFd(abort_fd_);
-  }
+  event_fd_.Close();
+  abort_fd_.Close();
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   CleanupPosixTimer();
 #endif
@@ -519,21 +528,6 @@ int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
 #endif
 }
 
-static int MakeAbortEvent() {
-#if defined(__APPLE__)
-  // On MacOS we use a kqueue.
-  int kq = kqueue();
-  struct kevent e;
-
-  EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_ABSOLUTE, 0, 0);
-  kevent(kq, &e, 1, NULL, 0, NULL);
-  return kq;
-#elif defined(__linux__)
-  // On Linux we use an eventfd.
-  return eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-#endif
-}
-
 int Coroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
@@ -547,7 +541,7 @@ int Coroutine::EndOfWait(int timer_fd) const {
     close(timer_fd);
 #endif
   }
-  if (wait_result_ == abort_fd_) {
+  if (abort_fd_.IsValid() && wait_result_ == abort_fd_.poll_fd) {
     abort_pending_ = true;
     throw AbortException();
   }
@@ -576,13 +570,13 @@ void Coroutine::AddAbortFd() const {
   if (!scheduler_.aborts_enabled_) {
     return;
   }
-  if (abort_fd_ == -1) {
-    abort_fd_ = MakeAbortEvent();
+  if (!abort_fd_.IsValid()) {
+    abort_fd_ = EventFd::CreateAbort();
   }
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  wait_fds_.push_back(YieldedCoroutine(this, abort_fd_, EPOLLIN));
+  wait_fds_.push_back(YieldedCoroutine(this, abort_fd_.poll_fd, EPOLLIN));
 #else
-  struct pollfd abortfd = {.fd = abort_fd_, .events = POLLIN};
+  struct pollfd abortfd = {.fd = abort_fd_.poll_fd, .events = POLLIN};
   wait_fds_.push_back(abortfd);
 #endif
 }
@@ -839,21 +833,9 @@ void Coroutine::CleanupPosixTimer() const {
 
 #endif
 
-void Coroutine::TriggerEvent() const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  co::TriggerEvent(yield_fd_.fd);
-#else
-  co::TriggerEvent(event_fd_.fd);
-#endif
-}
+void Coroutine::TriggerEvent() const { event_fd_.Trigger(); }
 
-void Coroutine::ClearEvent() const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  co::ClearEvent(yield_fd_.fd);
-#else
-  co::ClearEvent(event_fd_.fd);
-#endif
-}
+void Coroutine::ClearEvent() const { event_fd_.Clear(); }
 
 #if CO_POLL_MODE == CO_POLL_POLL
 void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
@@ -862,7 +844,8 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
   case State::kCoReady:
     [[fallthrough]];
   case State::kCoYielded:
-    pollfds.push_back(event_fd_);
+    pollfds.push_back(
+        {.fd = event_fd_.poll_fd, .events = POLLIN, .revents = 0});
     covec.push_back(this);
     break;
   case State::kCoWaiting:
@@ -1096,22 +1079,13 @@ void Coroutine::Resume(int value) const {
 
 void Coroutine::Abort() const {
   abort_pending_ = true;
-  if (abort_fd_ == -1) {
-    return;
-  }
-  co::TriggerEvent(abort_fd_);
+  abort_fd_.Trigger();
 }
 
 void Coroutine::GetAllFds(std::vector<int> &fds) const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  if (yield_fd_.fd != -1) {
-    fds.push_back(yield_fd_.fd);
+  if (event_fd_.poll_fd != -1) {
+    fds.push_back(event_fd_.poll_fd);
   }
-#else
-  if (event_fd_.fd != -1) {
-    fds.push_back(event_fd_.fd);
-  }
-#endif
   if (state_ == State::kCoWaiting) {
     for (auto &fd : wait_fds_) {
       fds.push_back(fd.fd);
@@ -1120,31 +1094,27 @@ void Coroutine::GetAllFds(std::vector<int> &fds) const {
 }
 
 CoroutineScheduler::CoroutineScheduler() {
+  interrupt_fd_ = EventFd::Create();
+  co_interrupt_fd_ = EventFd::Create();
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  interrupt_fd_ = NewEventFd();
-  co_interrupt_fd_ = NewEventFd();
   epoll_fd_ = epoll_create1(0);
   if (epoll_fd_ == -1) {
     std::cerr << "Failed to create epoll fd: " << strerror(errno) << std::endl;
     abort();
   }
-  AddEpollFd(interrupt_fd_, EPOLLIN);
-  AddEpollFd(co_interrupt_fd_, EPOLLIN);
-#else
-  interrupt_fd_.fd = NewEventFd();
-  interrupt_fd_.events = POLLIN;
-  co_interrupt_fd_.fd = NewEventFd();
-  co_interrupt_fd_.events = POLLIN;
+  AddEpollFd(interrupt_fd_.poll_fd, EPOLLIN);
+  AddEpollFd(co_interrupt_fd_.poll_fd, EPOLLIN);
 #endif
 }
 
 CoroutineScheduler::~CoroutineScheduler() {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  close(epoll_fd_);
-  close(interrupt_fd_);
-#else
-  CloseEventFd(interrupt_fd_.fd);
+  if (epoll_fd_ != -1) {
+    close(epoll_fd_);
+  }
 #endif
+  interrupt_fd_.Close();
+  co_interrupt_fd_.Close();
 }
 
 
@@ -1237,8 +1207,10 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
   poll_state->pollfds.clear();
   poll_state->coroutines.clear();
 
-  poll_state->pollfds.push_back(interrupt_fd_);
-  poll_state->pollfds.push_back(co_interrupt_fd_);
+  poll_state->pollfds.push_back(
+      {.fd = interrupt_fd_.poll_fd, .events = POLLIN, .revents = 0});
+  poll_state->pollfds.push_back(
+      {.fd = co_interrupt_fd_.poll_fd, .events = POLLIN, .revents = 0});
   for (auto *c : coroutines_) {
     auto state = c->GetState();
     if (state == Coroutine::State::kCoNew ||
@@ -1303,10 +1275,10 @@ void CoroutineScheduler::Run() {
       }
       auto it = waiting_coroutines_.find(event.data.fd);
       if (it == waiting_coroutines_.end()) {
-        if (event.data.fd == interrupt_fd_) {
-          events.push_back(YieldedCoroutine(nullptr, interrupt_fd_));
-        } else if (event.data.fd == co_interrupt_fd_) {
-          events.push_back(YieldedCoroutine(nullptr, co_interrupt_fd_));
+        if (event.data.fd == interrupt_fd_.poll_fd) {
+          events.push_back(YieldedCoroutine(nullptr, interrupt_fd_.poll_fd));
+        } else if (event.data.fd == co_interrupt_fd_.poll_fd) {
+          events.push_back(YieldedCoroutine(nullptr, co_interrupt_fd_.poll_fd));
         }
         continue;
       }
@@ -1317,11 +1289,13 @@ void CoroutineScheduler::Run() {
     // Sort the events by the time they have been waiting.
     std::sort(events.begin(), events.end(),
               [this](const YieldedCoroutine &a, const YieldedCoroutine &b) {
-                if (a.fd == interrupt_fd_ || b.fd == interrupt_fd_) {
+                if (a.fd == interrupt_fd_.poll_fd ||
+                    b.fd == interrupt_fd_.poll_fd) {
                   // Interrupt fd always goes first.
                   return true;
                 }
-                if (a.fd == co_interrupt_fd_ || b.fd == co_interrupt_fd_) {
+                if (a.fd == co_interrupt_fd_.poll_fd ||
+                    b.fd == co_interrupt_fd_.poll_fd) {
                   // Co interrupt fd always goes last.
                   return false;
                 }
@@ -1363,12 +1337,13 @@ void CoroutineScheduler::Run() {
     // Sort the events by the time they have been waiting.
     std::sort(events.begin(), events.end(),
               [this](const YieldedCoroutine &a, const YieldedCoroutine &b) {
-                if (a.fd == interrupt_fd_.fd || b.fd == interrupt_fd_.fd) {
+                if (a.fd == interrupt_fd_.poll_fd ||
+                    b.fd == interrupt_fd_.poll_fd) {
                   // Interrupt fd always goes first.
                   return true;
                 }
-                if (a.fd == co_interrupt_fd_.fd ||
-                    b.fd == co_interrupt_fd_.fd) {
+                if (a.fd == co_interrupt_fd_.poll_fd ||
+                    b.fd == co_interrupt_fd_.poll_fd) {
                   // Co interrupt fd always goes last.
                   return false;
                 }
@@ -1405,24 +1380,14 @@ void CoroutineScheduler::Run() {
       }
       YieldedCoroutine *c = &events[index];
       index++;
-#if CO_POLL_MODE == CO_POLL_EPOLL
-      if (c->fd == interrupt_fd_) {
-        ClearEvent(interrupt_fd_);
+      if (c->fd == interrupt_fd_.poll_fd) {
+        interrupt_fd_.Clear();
         continue;
       }
-      if (c->fd == co_interrupt_fd_) {
+      if (c->fd == co_interrupt_fd_.poll_fd) {
         // Coroutine interrupt triggered, don't clear it.
         continue;
       }
-#else
-      if (c->fd == interrupt_fd_.fd) {
-        ClearEvent(interrupt_fd_.fd);
-        continue;
-      }
-      if (c->fd == co_interrupt_fd_.fd) {
-        continue;
-      }
-#endif
 
       if (c->co == nullptr) {
         // Shouldn't happen.
@@ -1540,11 +1505,7 @@ uint32_t CoroutineScheduler::AllocateId() {
 }
 
 void CoroutineScheduler::TriggerInterrupt() const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  TriggerEvent(co_interrupt_fd_);
-#else
-  TriggerEvent(co_interrupt_fd_.fd);
-#endif
+  co_interrupt_fd_.Trigger();
 }
 
 void CoroutineScheduler::Stop() {
@@ -1556,11 +1517,7 @@ void CoroutineScheduler::Stop() {
   } else {
     running_ = false;
   }
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  TriggerEvent(interrupt_fd_);
-#else
-  TriggerEvent(interrupt_fd_.fd);
-#endif
+  interrupt_fd_.Trigger();
 }
 
 void CoroutineScheduler::Show() {
@@ -1581,12 +1538,9 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
   std::vector<int> fds;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   fds.push_back(epoll_fd_);
-  fds.push_back(interrupt_fd_);
-  fds.push_back(co_interrupt_fd_);
-#else
-  fds.push_back(interrupt_fd_.fd);
-  fds.push_back(co_interrupt_fd_.fd);
 #endif
+  fds.push_back(interrupt_fd_.poll_fd);
+  fds.push_back(co_interrupt_fd_.poll_fd);
   for (auto *co : coroutines_) {
     co->GetAllFds(fds);
   }
