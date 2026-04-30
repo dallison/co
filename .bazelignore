@@ -1,1 +1,5 @@
 bazel-cocpp
+_deps
+build
+lib
+bin

@@ -187,7 +187,7 @@ public:
   ~Scheduler();
 
   void Run();
-  void Stop() { running_ = false; }
+  void Stop() { running_ = false; TriggerInterrupt(); }
 
   template<typename Func>
   Coroutine* Spawn(Func&& func, const std::string& name = "",

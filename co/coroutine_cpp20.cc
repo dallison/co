@@ -489,7 +489,8 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
     }
 
     // Clean up scheduler-owned timer FDs.
-    if (fd != interrupt_fd_ && timerfds_.count(fd) > 0) {
+    bool is_timer = fd != interrupt_fd_ && timerfds_.count(fd) > 0;
+    if (is_timer) {
 #if CO_TIMER_MODE == CO_TIMER_TIMERFD
       uint64_t val;
       (void)read(fd, &val, sizeof(val));
@@ -509,12 +510,18 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
         epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
       }
 #endif
-      if (fd_it != waiting_fds_.end() && fd_it->second.empty()) {
-        waiting_fds_.erase(fd_it);
-      }
-      coroutine_fds_.erase(it);
       timerfds_.erase(fd);
     }
+
+    if (fd_it != waiting_fds_.end() && fd_it->second.empty()) {
+      waiting_fds_.erase(fd_it);
+#if CO_POLL_MODE == CO_POLL_EPOLL
+      if (!is_timer && epoll_fd_ != -1) {
+        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+      }
+#endif
+    }
+    coroutine_fds_.erase(it);
   }
 
   // Also detach from interrupt FD waiting list if present.
