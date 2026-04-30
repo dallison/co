@@ -53,6 +53,18 @@
 #define CO_TIMER_EVENT 2
 #define CO_TIMER_POSIX 3
 
+// Event-fd backend selection (used by co::EventFd):
+// 1. CO_EVENT_EVENTFD - Linux eventfd (Linux only)
+// 2. CO_EVENT_KQUEUE  - macOS kqueue with EVFILT_USER (macOS only)
+// 3. CO_EVENT_PIPE    - non-blocking pipe pair (portable)
+//
+// You can override the default backend by defining CO_EVENT_MODE before
+// including this header (e.g. -DCO_EVENT_MODE=CO_EVENT_PIPE) so you can
+// exercise the portable pipe-based path on Linux/macOS.
+#define CO_EVENT_EVENTFD 1
+#define CO_EVENT_KQUEUE 2
+#define CO_EVENT_PIPE 3
+
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -79,6 +91,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_EVENT
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_KQUEUE
+#endif
 #include <csetjmp>
 
 #elif defined(__linux__)
@@ -96,6 +111,9 @@
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
 #define CO_TIMER_MODE CO_TIMER_TIMERFD // Change this line to use POSIX timer instead
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_EVENTFD
+#endif
 
 #elif defined(__QNX__) || defined(__QNXNTO__)
 // QNX configuration
@@ -108,6 +126,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #else
 // Other OS, use the custom context switcher if available
 // or setjmp/longjmp if not.  The custom context switcher is only available
@@ -121,6 +142,9 @@
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX // Use POSIX timer for other OSes
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #endif
 
 #include <poll.h>

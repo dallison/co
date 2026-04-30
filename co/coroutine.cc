@@ -17,14 +17,20 @@
 #include "bitset.h"
 
 #if defined(__APPLE__)
-#include <sys/event.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#endif
 
-#elif defined(__linux__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE || CO_TIMER_MODE == CO_TIMER_EVENT
+#include <sys/event.h>
+#endif
+
+#if CO_EVENT_MODE == CO_EVENT_EVENTFD
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
+#endif
 
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
+#include <sys/timerfd.h>
 #endif
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
@@ -77,12 +83,11 @@ namespace co {
 
 struct AbortException {};
 
-#if !defined(__APPLE__) && !defined(__linux__)
+#if CO_EVENT_MODE == CO_EVENT_PIPE
 namespace {
 
 // Allocate a non-blocking pipe pair, returning {read_fd, write_fd} or
-// {-1, -1} on failure.  Used as the portable fallback for EventFd on systems
-// that have neither Linux eventfd nor macOS kqueue.
+// {-1, -1} on failure.  Used as the portable fallback for EventFd.
 std::pair<int, int> MakeNonBlockingPipe() {
   int pipefd[2];
   if (::pipe(pipefd) == -1) {
@@ -102,34 +107,36 @@ std::pair<int, int> MakeNonBlockingPipe() {
 
 EventFd EventFd::Create() {
   EventFd e;
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   int fd = kqueue();
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int fd = eventfd(0, EFD_NONBLOCK);
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   auto pipefd = MakeNonBlockingPipe();
   if (pipefd.first == -1) {
     return e;
   }
   e.poll_fd = pipefd.first;
   e.trigger_fd = pipefd.second;
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
   return e;
 }
 
 EventFd EventFd::CreateAbort() {
   EventFd e;
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   int kq = kqueue();
   if (kq == -1) {
     return e;
@@ -140,20 +147,22 @@ EventFd EventFd::CreateAbort() {
   kevent(kq, &ev, 1, NULL, 0, NULL);
   e.poll_fd = kq;
   e.trigger_fd = kq;
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   auto pipefd = MakeNonBlockingPipe();
   if (pipefd.first == -1) {
     return e;
   }
   e.poll_fd = pipefd.first;
   e.trigger_fd = pipefd.second;
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
   return e;
 }
@@ -162,16 +171,18 @@ void EventFd::Trigger() const {
   if (trigger_fd == -1) {
     return;
   }
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, nullptr);
   kevent(trigger_fd, &e, 1, 0, 0, 0);
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int64_t val = 1;
   (void)write(trigger_fd, &val, 8);
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   char ch = 'x';
   (void)write(trigger_fd, &ch, 1);
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
 }
 
@@ -179,18 +190,20 @@ void EventFd::Clear() const {
   if (poll_fd == -1) {
     return;
   }
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
   kevent(poll_fd, &e, 1, nullptr, 0, 0);
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int64_t val;
   (void)read(poll_fd, &val, 8);
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   // Drain the read end of the pipe.
   char buf[64];
   while (::read(poll_fd, buf, sizeof(buf)) > 0) {
   }
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
 }
 
