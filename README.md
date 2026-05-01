@@ -190,7 +190,7 @@ for Linux, macOS, and QNX on x86_64 and ARM64 (Aarch64) architectures. A fallbac
 using setjmp/longjmp is also available.
 
 The C++20 library uses standard C++20 coroutines and should work on any platform
-with a C++20-compatible compiler (GCC 10+, Clang 14+, MSVC 2019+). On Linux it
+with a C++20-compatible compiler (GCC 10+, Clang 17+, MSVC 2019+). On Linux it
 uses epoll for I/O readiness; on other platforms it falls back to poll.
 
 ### Timer Implementations (C++17 library)
