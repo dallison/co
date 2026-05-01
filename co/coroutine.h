@@ -53,6 +53,18 @@
 #define CO_TIMER_EVENT 2
 #define CO_TIMER_POSIX 3
 
+// Event-fd backend selection (used by co::EventFd):
+// 1. CO_EVENT_EVENTFD - Linux eventfd (Linux only)
+// 2. CO_EVENT_KQUEUE  - macOS kqueue with EVFILT_USER (macOS only)
+// 3. CO_EVENT_PIPE    - non-blocking pipe pair (portable)
+//
+// You can override the default backend by defining CO_EVENT_MODE before
+// including this header (e.g. -DCO_EVENT_MODE=CO_EVENT_PIPE) so you can
+// exercise the portable pipe-based path on Linux/macOS.
+#define CO_EVENT_EVENTFD 1
+#define CO_EVENT_KQUEUE 2
+#define CO_EVENT_PIPE 3
+
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -79,6 +91,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_EVENT
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_KQUEUE
+#endif
 #include <csetjmp>
 
 #elif defined(__linux__)
@@ -96,6 +111,9 @@
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
 #define CO_TIMER_MODE CO_TIMER_TIMERFD // Change this line to use POSIX timer instead
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_EVENTFD
+#endif
 
 #elif defined(__QNX__) || defined(__QNXNTO__)
 // QNX configuration
@@ -108,6 +126,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #else
 // Other OS, use the custom context switcher if available
 // or setjmp/longjmp if not.  The custom context switcher is only available
@@ -121,6 +142,9 @@
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX // Use POSIX timer for other OSes
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #endif
 
 #include <poll.h>
@@ -234,6 +258,51 @@ struct YieldedCoroutine {
   const Coroutine *co = nullptr;
   int fd = -1;
   uint32_t events = 0;
+};
+
+// EventFd is a portable representation of a triggerable file descriptor used
+// to wake up coroutines.  On Linux it wraps an eventfd; on macOS it wraps a
+// kqueue (with an EVFILT_USER filter); on other systems it is implemented as
+// a non-blocking pipe pair.  In all cases:
+//
+//   - poll_fd    is the file descriptor that should be added to a poll/epoll
+//                set.  It becomes readable when the event is triggered.
+//   - trigger_fd is the file descriptor that should be written to in order to
+//                signal the event.  On Linux/macOS it is the same fd as
+//                poll_fd; on systems backed by a pipe it is the write end of
+//                the pipe.
+//
+// This is functionally equivalent to toolbelt::TriggerFd but is self-contained
+// to avoid a circular dependency on cpp_toolbelt.
+struct EventFd {
+  int poll_fd = -1;
+  int trigger_fd = -1;
+
+  bool IsValid() const { return poll_fd != -1; }
+
+  // Trigger the event so that anything polling poll_fd will wake up.
+  void Trigger() const;
+
+  // Drain a previously triggered event (no-op if not triggered).
+  void Clear() const;
+
+  // Close any owned file descriptors and reset to the invalid state.
+  void Close();
+
+  // Reset to the invalid state without closing any file descriptors.
+  void Reset() {
+    poll_fd = -1;
+    trigger_fd = -1;
+  }
+
+  // Allocate a new event fd suitable for general signalling.  Returns an
+  // invalid EventFd (IsValid() == false) on failure.
+  static EventFd Create();
+
+  // Allocate a new event fd suitable for use as an abort signal.  On Linux
+  // this is an eventfd with EFD_CLOEXEC set; on other platforms it behaves
+  // identically to Create().
+  static EventFd CreateAbort();
 };
 
 struct CoroutineOptions {
@@ -546,16 +615,20 @@ protected:
   // Aborting a coroutine causes it to correctly terminate its execution function, unwinding
   // the stack and calling destructors.  It is a clean way to terminate a coroutine without
   // having to use an interrupt fd and check for termination in the coroutine function.
-  mutable int abort_fd_ = -1;
+  mutable EventFd abort_fd_;
   mutable bool abort_pending_ = false;    // Coroutine::Abort called.
   mutable bool aborted_ = false;      // Abort has been processed.
+
+  // Event fd used to wake this coroutine up.  The scheduler waits on
+  // event_fd_.poll_fd; TriggerEvent()/ClearEvent() write/read via the
+  // EventFd's trigger_fd/poll_fd as appropriate.
+  mutable EventFd event_fd_;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   mutable YieldedCoroutine yield_fd_;
   mutable std::vector<YieldedCoroutine> wait_fds_;
   mutable int num_epoll_events_ = 0;
 #else
-  mutable struct pollfd event_fd_; // Pollfd for event.
   mutable std::vector<struct pollfd>
       wait_fds_; // Pollfds for waiting for an fd.
 #endif
@@ -639,13 +712,7 @@ public:
   void RemoveCoroutine(const Coroutine *c);
   void StartCoroutine(Coroutine *c);
 
-  int GetInterruptFd() const {
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    return co_interrupt_fd_;
-#else
-    return co_interrupt_fd_.fd;
-#endif
-  }
+  int GetInterruptFd() const { return co_interrupt_fd_.poll_fd; }
 
   void TriggerInterrupt() const;
 
@@ -726,14 +793,12 @@ protected:
   absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
       waiting_coroutines_;
   int epoll_fd_ = -1;
-  int interrupt_fd_ = -1;
-  int co_interrupt_fd_ = -1;
   size_t num_epoll_events_ = 0;
 #else
   PollState poll_state_;
-  struct pollfd interrupt_fd_ = {-1, POLLIN, 0};
-  struct pollfd co_interrupt_fd_ = {-1, POLLIN, 0};
 #endif
+  EventFd interrupt_fd_;
+  EventFd co_interrupt_fd_;
 
   uint64_t tick_count_ = 0;
   CompletionCallback completion_callback_;
