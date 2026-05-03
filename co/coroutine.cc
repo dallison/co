@@ -45,17 +45,40 @@
 
 constexpr bool kCoDebug = false;
 
+// Tell ThreadSanitizer that we are about to switch to the given fiber.  Must
+// be called immediately before the actual context switch instruction (longjmp,
+// setcontext, ...) so that subsequent code is attributed to the new fiber and
+// the appropriate happens-before relation between fibers is established.  See
+// https://github.com/llvm/llvm-project/blob/main/compiler-rt/include/sanitizer/tsan_interface.h
+#if defined(CO_THREAD_SANITIZER)
+#define CO_TSAN_SWITCH_TO_FIBER(fiber)                                         \
+  do {                                                                         \
+    if ((fiber) != nullptr) {                                                  \
+      __tsan_switch_to_fiber((fiber), 0);                                      \
+    }                                                                          \
+  } while (0)
+#else
+#define CO_TSAN_SWITCH_TO_FIBER(fiber) ((void)0)
+#endif
+
 #if CO_CTX_MODE == CO_CTX_SETJMP
 #define SETCONTEXT(ctx) __real_longjmp(ctx, 1)
 #define GETCONTEXT(ctx) setjmp(ctx)
 #define SWAPCONTEXT(from, to)                                                  \
-  if (setjmp(from) == 0) {                                                     \
-    __real_longjmp(to, 1);                                                     \
-  }
+  do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
+    if (setjmp(from) == 0) {                                                   \
+      __real_longjmp(to, 1);                                                   \
+    }                                                                          \
+  } while (0)
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
 #define SETCONTEXT(ctx) setcontext(&ctx)
 #define GETCONTEXT(ctx) getcontext(&ctx)
-#define SWAPCONTEXT(from, to) swapcontext(&from, &to)
+#define SWAPCONTEXT(from, to)                                                  \
+  do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
+    swapcontext(&from, &to);                                                   \
+  } while (0)
 #else
 #define SETCONTEXT(ctx) CoroutineSetContext(&ctx)
 #define GETCONTEXT(ctx) CoroutineGetContext(&ctx)
@@ -66,6 +89,7 @@ constexpr bool kCoDebug = false;
 #define SWAPCONTEXT(from, to)                                                  \
   do {                                                                         \
     __sanitizer_finish_switch_fiber(scheduler_.fake_stack_, nullptr, nullptr); \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
     CoroutineSwapContext(&from, &to);                                          \
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),     \
                                    stack_.size());                             \
@@ -73,6 +97,7 @@ constexpr bool kCoDebug = false;
 #else
 #define SWAPCONTEXT(from, to)                                                  \
   do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
     CoroutineSwapContext(&from, &to);                                          \
   } while (0)
 #endif
@@ -313,6 +338,16 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
       stack_.data(), static_cast<char *>(stack_.data()) + stack_.size());
 #endif
 
+#if defined(CO_THREAD_SANITIZER)
+  // Create a TSan fiber for this coroutine.  TSan will use it to attribute
+  // memory operations and synchronization to the right logical thread when we
+  // call __tsan_switch_to_fiber on every context switch.
+  tsan_fiber_ = __tsan_create_fiber(0);
+  if (tsan_fiber_ != nullptr) {
+    __tsan_set_fiber_name(tsan_fiber_, name_.c_str());
+  }
+#endif
+
   event_fd_ = EventFd::Create();
   if (!event_fd_.IsValid()) {
     fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
@@ -343,6 +378,12 @@ Coroutine::~Coroutine() {
 #if CO_HAVE_VALGRIND
   if (valgrind_stack_id_ != -1) {
     VALGRIND_STACK_DEREGISTER(valgrind_stack_id_);
+  }
+#endif
+#if defined(CO_THREAD_SANITIZER)
+  if (tsan_fiber_ != nullptr) {
+    __tsan_destroy_fiber(tsan_fiber_);
+    tsan_fiber_ = nullptr;
   }
 #endif
 }
@@ -420,7 +461,12 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
-void Coroutine::Exit() const { SETCONTEXT(exit_); }
+void Coroutine::Exit() const {
+  // Tell TSan we are leaving the coroutine fiber and returning to the
+  // scheduler before we actually switch stacks.
+  CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);
+  SETCONTEXT(exit_);
+}
 
 void Coroutine::Start() {
   if (state_ == State::kCoNew) {
@@ -962,6 +1008,16 @@ void Coroutine::InvokeFunction() {
 #if defined(CO_ADDRESS_SANITIZER)
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
+  // The coroutine body has returned; the assembly trampoline (or the
+  // ucontext uc_link/getcontext+setcontext path) is about to longjmp/setcontext
+  // back to the scheduler.  Tell TSan we are switching fibers before that
+  // happens.  We use the no-sync flag because there is nothing the scheduler
+  // can synchronize with on a dying coroutine.
+#if defined(CO_THREAD_SANITIZER)
+  if (scheduler_.tsan_fiber_ != nullptr) {
+    __tsan_switch_to_fiber(scheduler_.tsan_fiber_, 0);
+  }
+#endif
 }
 
 // We use an intermediate function to do the invocation of
@@ -974,6 +1030,7 @@ void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
 CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
 void Coroutine::Resume(int value) const {
   if (aborted_) {
     // Cannot resume an aborted coroutine.
@@ -997,6 +1054,9 @@ void Coroutine::Resume(int value) const {
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
                                    stack_.size());
 #endif
+    // Tell TSan we are about to switch from the scheduler to this
+    // coroutine's fiber before doing the actual stack switch below.
+    CO_TSAN_SWITCH_TO_FIBER(tsan_fiber_);
     SetState(State::kCoRunning);
     yielded_address_ = nullptr;
 #if CO_CTX_MODE == CO_CTX_SETJMP
@@ -1073,6 +1133,8 @@ void Coroutine::Resume(int value) const {
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
+    // Switch TSan over to the coroutine's fiber before we resume it.
+    CO_TSAN_SWITCH_TO_FIBER(tsan_fiber_);
     SETCONTEXT(resume_);
     break;
   case State::kCoRunning:
@@ -1244,6 +1306,16 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 void CoroutineScheduler::Run() {
   running_ = true;
   co::scheduler = this; // Thread local.
+#if defined(CO_THREAD_SANITIZER)
+  // Capture the TSan fiber for the thread that runs the scheduler loop.  It
+  // has to be captured here (rather than in the constructor) because the
+  // scheduler may have been constructed on a different thread from the one
+  // that calls Run().  __tsan_get_current_fiber returns the implicit fiber
+  // associated with the calling thread.
+  if (tsan_fiber_ == nullptr) {
+    tsan_fiber_ = __tsan_get_current_fiber();
+  }
+#endif
 #if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> epoll_events;
 #endif
