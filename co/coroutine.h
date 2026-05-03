@@ -216,6 +216,19 @@ void __sanitizer_finish_switch_fiber(void *fake_stack_save,
 }
 #endif
 
+#if defined(CO_THREAD_SANITIZER)
+extern "C" {
+// Fiber switching API exposed by the ThreadSanitizer runtime.  We forward
+// declare the entry points we use rather than including <sanitizer/tsan_interface.h>
+// because that header is not always available on every toolchain.
+void *__tsan_get_current_fiber(void);
+void *__tsan_create_fiber(unsigned flags);
+void __tsan_destroy_fiber(void *fiber);
+void __tsan_switch_to_fiber(void *fiber, unsigned flags);
+void __tsan_set_fiber_name(void *fiber, const char *name);
+}
+#endif
+
 namespace co {
 
 class CoroutineScheduler;
@@ -335,6 +348,10 @@ struct WaitFd {
 // errors (use-after-return). The principal function of a coroutine is likely
 // to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER
 // (detect_sanitizers.h) to disable diagnostics related to its stack frame.
+//
+// ThreadSanitizer is also informed about every coroutine context switch via the
+// __tsan_switch_to_fiber API, so cooperative yields between coroutines and the
+// scheduler do not trigger spurious data-race reports.
 class Coroutine {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
@@ -648,6 +665,12 @@ protected:
 #if CO_HAVE_VALGRIND
   int valgrind_stack_id_ = -1;
 #endif
+#if defined(CO_THREAD_SANITIZER)
+  // Opaque per-coroutine fiber context owned by the TSan runtime.  Created in
+  // the constructor and destroyed in the destructor.  Switched to whenever the
+  // scheduler resumes this coroutine.
+  void *tsan_fiber_ = nullptr;
+#endif
 };
 
 // A Generator is a coroutine that generates values.  The magic lamda line
@@ -805,6 +828,13 @@ protected:
   absl::flat_hash_set<const Coroutine *> deletions_;
 #if defined(CO_ADDRESS_SANITIZER)
   void *fake_stack_ = nullptr;
+#endif
+#if defined(CO_THREAD_SANITIZER)
+  // TSan fiber identifying the thread that runs the scheduler loop.  Captured
+  // lazily on the first call to Run() (which is when we know which thread the
+  // scheduler is executing on) and switched to whenever a coroutine yields
+  // back to the scheduler.
+  void *tsan_fiber_ = nullptr;
 #endif
   std::atomic<bool> aborts_enabled_ = true;
   std::atomic<bool> abort_on_stop_ = false;
