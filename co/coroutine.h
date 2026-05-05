@@ -656,7 +656,8 @@ protected:
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   mutable int posix_timer_write_fd_ = -1; // Write end of pipe for POSIX timer
-  mutable timer_t posix_timer_id_ = nullptr; // POSIX timer ID
+  mutable timer_t posix_timer_id_ = {}; // POSIX timer ID
+  mutable bool posix_timer_active_ = false;
   mutable int posix_timer_read_fd_ = -1; // Read end of pipe (timer fd)
 #endif
 
