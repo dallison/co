@@ -578,6 +578,7 @@ int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
   
   // Store timer resources directly in the coroutine
   coroutine->posix_timer_id_ = timer_id;
+  coroutine->posix_timer_active_ = true;
   coroutine->posix_timer_read_fd_ = read_fd;
   coroutine->posix_timer_write_fd_ = write_fd;
  
@@ -867,7 +868,7 @@ void Coroutine::Nanosleep(uint64_t ns) const {
 void Coroutine::CleanupPosixTimer() const {
   // This needs to be idempotent as it is called in the destructor and might have already
   // been called after a Wait has finished.
-  if (posix_timer_id_ != nullptr) {
+  if (posix_timer_active_) {
     // Disarm the timer first
     struct itimerspec its;
     its.it_value.tv_sec = 0;
@@ -876,7 +877,8 @@ void Coroutine::CleanupPosixTimer() const {
     its.it_interval.tv_nsec = 0;
     timer_settime(posix_timer_id_, 0, &its, nullptr);
     timer_delete(posix_timer_id_);
-    posix_timer_id_ = nullptr;
+    posix_timer_id_ = {};
+    posix_timer_active_ = false;
   }
   
   if (posix_timer_write_fd_ != -1) {
