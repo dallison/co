@@ -188,6 +188,11 @@ public:
 
   void Run();
   void Stop() { running_ = false; TriggerInterrupt(); }
+  // Bound coroutine work between I/O readiness checks. Smaller values favor
+  // latency; larger values amortize polling overhead for CPU-bound workloads.
+  void SetMaxReadyResumesBeforePoll(size_t count) {
+    max_ready_resumes_before_poll_ = count == 0 ? 1 : count;
+  }
 
   template<typename Func>
   Coroutine* Spawn(Func&& func, const std::string& name = "",
@@ -198,7 +203,7 @@ public:
     coroutines_.push_back(std::move(coroutine));
     ptr->SetState(Coroutine::State::kReady);
     ready_queue_.push_back(ptr);
-    TriggerInterrupt();
+    WakeSchedulerIfNeeded();
     return ptr;
   }
 
@@ -211,10 +216,11 @@ public:
 
 private:
   void ProcessReadyCoroutines();
-  void ProcessEvents();
+  void ProcessEvents(bool may_block);
   void CleanupCoroutine(Coroutine* coroutine);
   void CleanupTimeoutFd(Coroutine* coroutine);
   void TriggerInterrupt();
+  void WakeSchedulerIfNeeded();
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void DispatchEpollEvents(struct epoll_event* events, int count);
 #endif
@@ -224,7 +230,10 @@ private:
   std::deque<Coroutine*> ready_queue_;
   absl::flat_hash_map<int, std::vector<Coroutine*>> waiting_fds_;
   absl::flat_hash_map<Coroutine*, int> coroutine_fds_;
+  absl::flat_hash_map<Coroutine*, uint32_t> coroutine_events_;
   absl::flat_hash_set<int> timerfds_;
+  std::vector<struct pollfd> poll_fds_;
+  size_t max_ready_resumes_before_poll_ = 32;
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   struct PosixTimerInfo {

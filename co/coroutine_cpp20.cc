@@ -100,13 +100,19 @@ void Scheduler::TriggerInterrupt() {
 #endif
 }
 
+void Scheduler::WakeSchedulerIfNeeded() {
+  if (!running_ || co20::scheduler != this) {
+    TriggerInterrupt();
+  }
+}
+
 void Scheduler::ScheduleCoroutine(Coroutine* coroutine) {
   if (!coroutine) return;
   auto s = coroutine->GetState();
   if (s == Coroutine::State::kYielded || s == Coroutine::State::kReady) {
     coroutine->SetState(Coroutine::State::kReady);
     ready_queue_.push_back(coroutine);
-    TriggerInterrupt();
+    WakeSchedulerIfNeeded();
   }
 }
 
@@ -164,6 +170,7 @@ void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
 
     coroutine_fds_.erase(fd_it);
   }
+  coroutine_events_.erase(coroutine);
 
   // Also clean up interrupt FD waiting list.
   int ifd = coroutine->GetInterruptFd();
@@ -196,11 +203,12 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
     coroutine->SetWaitResult(fd);
     coroutine->SetState(Coroutine::State::kReady);
     ready_queue_.push_back(coroutine);
-    TriggerInterrupt();
+    WakeSchedulerIfNeeded();
     return;
   }
 
   coroutine->SetState(Coroutine::State::kWaiting);
+  coroutine_events_[coroutine] = event_mask;
 
   // If this coroutine was already waiting on a different FD, detach it first.
   auto existing_it = coroutine_fds_.find(coroutine);
@@ -254,10 +262,11 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
                         wait_list.end());
         if (wait_list.empty()) waiting_fds_.erase(fd);
         coroutine_fds_.erase(coroutine);
+        coroutine_events_.erase(coroutine);
         coroutine->SetWaitResult(-1);
         coroutine->SetState(Coroutine::State::kReady);
         ready_queue_.push_back(coroutine);
-        TriggerInterrupt();
+        WakeSchedulerIfNeeded();
         return;
       }
     }
@@ -522,6 +531,7 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
 #endif
     }
     coroutine_fds_.erase(it);
+    coroutine_events_.erase(coroutine);
   }
 
   // Also detach from interrupt FD waiting list if present.
@@ -548,8 +558,8 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
 
   coroutine->SetWaitResult(value);
   coroutine->SetState(Coroutine::State::kReady);
-  ready_queue_.push_back(coroutine);
-  TriggerInterrupt();
+  ready_queue_.push_front(coroutine);
+  WakeSchedulerIfNeeded();
 }
 
 void Scheduler::CleanupTimeoutFd(Coroutine* coroutine) {
@@ -612,7 +622,12 @@ void Scheduler::DispatchEpollEvents(struct epoll_event* events, int count) {
 #endif
 
 void Scheduler::ProcessReadyCoroutines() {
-  while (!ready_queue_.empty()) {
+  // Amortize event polling across a bounded burst of coroutine resumes. A
+  // continuously yielding coroutine remains responsive to fd events without
+  // paying for poll() and scheduler wakeup syscalls on every yield.
+  size_t resume_count = 0;
+  while (!ready_queue_.empty() &&
+         resume_count < max_ready_resumes_before_poll_) {
     Coroutine* coroutine = ready_queue_.front();
     ready_queue_.pop_front();
 
@@ -624,14 +639,7 @@ void Scheduler::ProcessReadyCoroutines() {
     if (coroutine->GetState() != Coroutine::State::kReady) continue;
 
     coroutine->Resume(coroutine->GetWaitResult());
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    if (epoll_fd_ != -1 && !waiting_fds_.empty()) {
-      struct epoll_event events[64];
-      int n = epoll_wait(epoll_fd_, events, 64, 0);
-      if (n > 0) DispatchEpollEvents(events, n);
-    }
-#endif
+    ++resume_count;
 
     if (coroutine->handle_.done() ||
         coroutine->GetState() == Coroutine::State::kRunning) {
@@ -641,66 +649,88 @@ void Scheduler::ProcessReadyCoroutines() {
   }
 }
 
-void Scheduler::ProcessEvents() {
+void Scheduler::ProcessEvents(bool may_block) {
   if (waiting_fds_.empty()) return;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   if (epoll_fd_ != -1) {
     struct epoll_event events[64];
-    // Non-blocking check first.
-    int n = epoll_wait(epoll_fd_, events, 64, 0);
-    if (n <= 0) {
-      if (waiting_fds_.empty()) return;
-      n = epoll_wait(epoll_fd_, events, 64, -1);
-      if (n <= 0) return;
-    }
+    int n = epoll_wait(epoll_fd_, events, 64, may_block ? -1 : 0);
+    if (n <= 0) return;
     DispatchEpollEvents(events, n);
     return;
   }
 #endif
 
   // poll() fallback
-  std::vector<struct pollfd> pfds;
-  std::vector<std::vector<Coroutine*>> coroutines_per_fd;
+  poll_fds_.clear();
+  poll_fds_.reserve(waiting_fds_.size() + 1);
 
   for (auto& [fd, coroutine_list] : waiting_fds_) {
     struct pollfd pfd;
     pfd.fd = fd;
-    pfd.events = POLLIN | POLLOUT;
+    pfd.events = 0;
+    for (Coroutine* coroutine : coroutine_list) {
+      auto primary_fd = coroutine_fds_.find(coroutine);
+      if (primary_fd != coroutine_fds_.end() && primary_fd->second == fd) {
+        auto event = coroutine_events_.find(coroutine);
+        if (event != coroutine_events_.end()) {
+          pfd.events |= event->second;
+        }
+      } else {
+        // Interrupt and timeout descriptors are always read for wakeups.
+        pfd.events |= POLLIN;
+      }
+    }
     pfd.revents = 0;
-    pfds.push_back(pfd);
-    coroutines_per_fd.push_back(coroutine_list);
+    poll_fds_.push_back(pfd);
   }
 
   struct pollfd interrupt_pfd;
   interrupt_pfd.fd = interrupt_fd_;
   interrupt_pfd.events = POLLIN;
   interrupt_pfd.revents = 0;
-  pfds.push_back(interrupt_pfd);
+  poll_fds_.push_back(interrupt_pfd);
 
-  int ret = poll(pfds.data(), pfds.size(), 0);
-  if (ret <= 0) {
-    if (waiting_fds_.empty()) return;
-    ret = poll(pfds.data(), pfds.size(), -1);
-    if (ret <= 0) return;
-  }
+  int ret = poll(poll_fds_.data(), poll_fds_.size(), may_block ? -1 : 0);
+  if (ret <= 0) return;
 
   // Drain interrupt fd.
-  if (pfds.back().revents & POLLIN) {
+  if (poll_fds_.back().revents & POLLIN) {
 #if defined(__linux__)
     uint64_t val;
     (void)read(interrupt_fd_, &val, sizeof(val));
 #else
-    char val;
-    (void)read(interrupt_fd_, &val, 1);
+    char values[64];
+    while (read(interrupt_fd_, values, sizeof(values)) > 0) {
+    }
 #endif
   }
 
-  for (size_t i = 0; i < coroutines_per_fd.size(); i++) {
-    if (pfds[i].revents & (POLLIN | POLLOUT | POLLHUP)) {
-      std::vector<Coroutine*> to_resume = coroutines_per_fd[i];
+  for (size_t i = 0; i + 1 < poll_fds_.size(); i++) {
+    int fd = poll_fds_[i].fd;
+    short revents = poll_fds_[i].revents;
+    if (revents != 0) {
+      auto waiting = waiting_fds_.find(fd);
+      if (waiting == waiting_fds_.end()) {
+        continue;
+      }
+      std::vector<Coroutine*> to_resume = waiting->second;
       for (Coroutine* c : to_resume) {
-        ResumeCoroutine(c, pfds[i].fd);
+        uint32_t event_mask = POLLIN;
+        auto primary_fd = coroutine_fds_.find(c);
+        if (primary_fd != coroutine_fds_.end() &&
+            primary_fd->second == fd) {
+          auto event = coroutine_events_.find(c);
+          if (event != coroutine_events_.end()) {
+            event_mask = event->second;
+          }
+        }
+        if ((revents & event_mask) == 0 &&
+            (revents & (POLLERR | POLLHUP)) == 0) {
+          continue;
+        }
+        ResumeCoroutine(c, fd);
       }
     }
   }
@@ -713,10 +743,12 @@ void Scheduler::Run() {
     ProcessReadyCoroutines();
 
     if (waiting_fds_.empty() && ready_queue_.empty()) break;
-    if (!ready_queue_.empty()) continue;
-    if (waiting_fds_.empty()) break;
+    if (waiting_fds_.empty()) {
+      if (ready_queue_.empty()) break;
+      continue;
+    }
 
-    ProcessEvents();
+    ProcessEvents(/*may_block=*/ready_queue_.empty());
   }
 
   running_ = false;

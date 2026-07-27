@@ -3,6 +3,7 @@
 #include "coroutine_cpp20.h"
 #include <gtest/gtest.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/eventfd.h>
@@ -119,6 +120,81 @@ TEST(Cpp20, Loop) {
   }
   
   scheduler.Run();
+}
+
+TEST(Cpp20, YieldingCoroutineDoesNotStarveFdWaiter) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool reader_done = false;
+  int yield_count = 0;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    if (fd == pipes[0]) {
+      char value;
+      (void)read(pipes[0], &value, 1);
+      reader_done = true;
+    }
+    co_return;
+  }, "reader");
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    while (!reader_done) {
+      ++yield_count;
+      co_await co.Yield();
+    }
+    co_return;
+  }, "busy-yielder");
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    const char value = 'x';
+    (void)write(pipes[1], &value, 1);
+    co_return;
+  }, "writer");
+
+  scheduler.Run();
+  close(pipes[0]);
+  close(pipes[1]);
+
+  EXPECT_TRUE(reader_done);
+  EXPECT_GT(yield_count, 0);
+}
+
+TEST(Cpp20, IoReadyCoroutineRunsBeforeYieldedCoroutine) {
+  Scheduler scheduler;
+  scheduler.SetMaxReadyResumesBeforePoll(1);
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool reader_done = false;
+  bool reader_ran_before_writer_resumed = false;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    if (fd == pipes[0]) {
+      char value;
+      (void)read(pipes[0], &value, 1);
+      reader_done = true;
+    }
+    co_return;
+  }, "reader");
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    const char value = 'x';
+    (void)write(pipes[1], &value, 1);
+    co_await co.Yield();
+    reader_ran_before_writer_resumed = reader_done;
+    co_return;
+  }, "writer");
+
+  scheduler.Run();
+  close(pipes[0]);
+  close(pipes[1]);
+
+  EXPECT_TRUE(reader_done);
+  EXPECT_TRUE(reader_ran_before_writer_resumed);
 }
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -866,6 +942,48 @@ TEST(Cpp20WaitTimeout, TimeoutExpires) {
     close(pipes[1]);
     co_return;
   }, "test");
+
+  scheduler.Run();
+  EXPECT_TRUE(timed_out);
+}
+
+TEST(Cpp20WaitTimeout, RepeatedTimeouts) {
+  Scheduler scheduler;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  int timeout_count = 0;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    for (int i = 0; i < 3; ++i) {
+      int fd = co_await co.Wait(pipes[0], POLLIN, 10000000ULL);
+      if (fd != pipes[0]) {
+        ++timeout_count;
+      }
+    }
+    close(pipes[0]);
+    close(pipes[1]);
+    co_return;
+  }, "test");
+
+  scheduler.Run();
+  EXPECT_EQ(timeout_count, 3);
+}
+
+TEST(Cpp20WaitTimeout, ReadWaitIgnoresWritableReadWriteFd) {
+  Scheduler scheduler;
+  int sockets[2];
+  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sockets));
+
+  bool timed_out = false;
+
+  scheduler.Spawn([&](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(sockets[0], POLLIN, 10000000ULL);
+    timed_out = fd != sockets[0];
+    close(sockets[0]);
+    close(sockets[1]);
+    co_return;
+  }, "read-waiter");
 
   scheduler.Run();
   EXPECT_TRUE(timed_out);
