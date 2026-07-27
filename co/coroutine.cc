@@ -17,14 +17,20 @@
 #include "bitset.h"
 
 #if defined(__APPLE__)
-#include <sys/event.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#endif
 
-#elif defined(__linux__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE || CO_TIMER_MODE == CO_TIMER_EVENT
+#include <sys/event.h>
+#endif
+
+#if CO_EVENT_MODE == CO_EVENT_EVENTFD
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
+#endif
 
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD
+#include <sys/timerfd.h>
 #endif
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
@@ -39,17 +45,40 @@
 
 constexpr bool kCoDebug = false;
 
+// Tell ThreadSanitizer that we are about to switch to the given fiber.  Must
+// be called immediately before the actual context switch instruction (longjmp,
+// setcontext, ...) so that subsequent code is attributed to the new fiber and
+// the appropriate happens-before relation between fibers is established.  See
+// https://github.com/llvm/llvm-project/blob/main/compiler-rt/include/sanitizer/tsan_interface.h
+#if defined(CO_THREAD_SANITIZER)
+#define CO_TSAN_SWITCH_TO_FIBER(fiber)                                         \
+  do {                                                                         \
+    if ((fiber) != nullptr) {                                                  \
+      __tsan_switch_to_fiber((fiber), 0);                                      \
+    }                                                                          \
+  } while (0)
+#else
+#define CO_TSAN_SWITCH_TO_FIBER(fiber) ((void)0)
+#endif
+
 #if CO_CTX_MODE == CO_CTX_SETJMP
 #define SETCONTEXT(ctx) __real_longjmp(ctx, 1)
 #define GETCONTEXT(ctx) setjmp(ctx)
 #define SWAPCONTEXT(from, to)                                                  \
-  if (setjmp(from) == 0) {                                                     \
-    __real_longjmp(to, 1);                                                     \
-  }
+  do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
+    if (setjmp(from) == 0) {                                                   \
+      __real_longjmp(to, 1);                                                   \
+    }                                                                          \
+  } while (0)
 #elif CO_CTX_MODE == CO_CTX_UCONTEXT
 #define SETCONTEXT(ctx) setcontext(&ctx)
 #define GETCONTEXT(ctx) getcontext(&ctx)
-#define SWAPCONTEXT(from, to) swapcontext(&from, &to)
+#define SWAPCONTEXT(from, to)                                                  \
+  do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
+    swapcontext(&from, &to);                                                   \
+  } while (0)
 #else
 #define SETCONTEXT(ctx) CoroutineSetContext(&ctx)
 #define GETCONTEXT(ctx) CoroutineGetContext(&ctx)
@@ -60,6 +89,7 @@ constexpr bool kCoDebug = false;
 #define SWAPCONTEXT(from, to)                                                  \
   do {                                                                         \
     __sanitizer_finish_switch_fiber(scheduler_.fake_stack_, nullptr, nullptr); \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
     CoroutineSwapContext(&from, &to);                                          \
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),     \
                                    stack_.size());                             \
@@ -67,6 +97,7 @@ constexpr bool kCoDebug = false;
 #else
 #define SWAPCONTEXT(from, to)                                                  \
   do {                                                                         \
+    CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);                           \
     CoroutineSwapContext(&from, &to);                                          \
   } while (0)
 #endif
@@ -77,12 +108,11 @@ namespace co {
 
 struct AbortException {};
 
-#if !defined(__APPLE__) && !defined(__linux__)
+#if CO_EVENT_MODE == CO_EVENT_PIPE
 namespace {
 
 // Allocate a non-blocking pipe pair, returning {read_fd, write_fd} or
-// {-1, -1} on failure.  Used as the portable fallback for EventFd on systems
-// that have neither Linux eventfd nor macOS kqueue.
+// {-1, -1} on failure.  Used as the portable fallback for EventFd.
 std::pair<int, int> MakeNonBlockingPipe() {
   int pipefd[2];
   if (::pipe(pipefd) == -1) {
@@ -102,34 +132,36 @@ std::pair<int, int> MakeNonBlockingPipe() {
 
 EventFd EventFd::Create() {
   EventFd e;
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   int fd = kqueue();
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int fd = eventfd(0, EFD_NONBLOCK);
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   auto pipefd = MakeNonBlockingPipe();
   if (pipefd.first == -1) {
     return e;
   }
   e.poll_fd = pipefd.first;
   e.trigger_fd = pipefd.second;
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
   return e;
 }
 
 EventFd EventFd::CreateAbort() {
   EventFd e;
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   int kq = kqueue();
   if (kq == -1) {
     return e;
@@ -140,20 +172,22 @@ EventFd EventFd::CreateAbort() {
   kevent(kq, &ev, 1, NULL, 0, NULL);
   e.poll_fd = kq;
   e.trigger_fd = kq;
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (fd == -1) {
     return e;
   }
   e.poll_fd = fd;
   e.trigger_fd = fd;
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   auto pipefd = MakeNonBlockingPipe();
   if (pipefd.first == -1) {
     return e;
   }
   e.poll_fd = pipefd.first;
   e.trigger_fd = pipefd.second;
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
   return e;
 }
@@ -162,16 +196,18 @@ void EventFd::Trigger() const {
   if (trigger_fd == -1) {
     return;
   }
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, nullptr);
   kevent(trigger_fd, &e, 1, 0, 0, 0);
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int64_t val = 1;
   (void)write(trigger_fd, &val, 8);
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   char ch = 'x';
   (void)write(trigger_fd, &ch, 1);
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
 }
 
@@ -179,18 +215,20 @@ void EventFd::Clear() const {
   if (poll_fd == -1) {
     return;
   }
-#if defined(__APPLE__)
+#if CO_EVENT_MODE == CO_EVENT_KQUEUE
   struct kevent e;
   EV_SET(&e, 1, EVFILT_USER, EV_DELETE, NOTE_TRIGGER, 0, nullptr);
   kevent(poll_fd, &e, 1, nullptr, 0, 0);
-#elif defined(__linux__)
+#elif CO_EVENT_MODE == CO_EVENT_EVENTFD
   int64_t val;
   (void)read(poll_fd, &val, 8);
-#else
+#elif CO_EVENT_MODE == CO_EVENT_PIPE
   // Drain the read end of the pipe.
   char buf[64];
   while (::read(poll_fd, buf, sizeof(buf)) > 0) {
   }
+#else
+#error "Unknown CO_EVENT_MODE"
 #endif
 }
 
@@ -300,6 +338,16 @@ Coroutine::Coroutine(CoroutineScheduler &scheduler,
       stack_.data(), static_cast<char *>(stack_.data()) + stack_.size());
 #endif
 
+#if defined(CO_THREAD_SANITIZER)
+  // Create a TSan fiber for this coroutine.  TSan will use it to attribute
+  // memory operations and synchronization to the right logical thread when we
+  // call __tsan_switch_to_fiber on every context switch.
+  tsan_fiber_ = __tsan_create_fiber(0);
+  if (tsan_fiber_ != nullptr) {
+    __tsan_set_fiber_name(tsan_fiber_, name_.c_str());
+  }
+#endif
+
   event_fd_ = EventFd::Create();
   if (!event_fd_.IsValid()) {
     fprintf(stderr, "Failed to allocate event fd: %s\n", strerror(errno));
@@ -330,6 +378,12 @@ Coroutine::~Coroutine() {
 #if CO_HAVE_VALGRIND
   if (valgrind_stack_id_ != -1) {
     VALGRIND_STACK_DEREGISTER(valgrind_stack_id_);
+  }
+#endif
+#if defined(CO_THREAD_SANITIZER)
+  if (tsan_fiber_ != nullptr) {
+    __tsan_destroy_fiber(tsan_fiber_);
+    tsan_fiber_ = nullptr;
   }
 #endif
 }
@@ -407,7 +461,12 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
-void Coroutine::Exit() const { SETCONTEXT(exit_); }
+void Coroutine::Exit() const {
+  // Tell TSan we are leaving the coroutine fiber and returning to the
+  // scheduler before we actually switch stacks.
+  CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);
+  SETCONTEXT(exit_);
+}
 
 void Coroutine::Start() {
   if (state_ == State::kCoNew) {
@@ -519,6 +578,7 @@ int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
   
   // Store timer resources directly in the coroutine
   coroutine->posix_timer_id_ = timer_id;
+  coroutine->posix_timer_active_ = true;
   coroutine->posix_timer_read_fd_ = read_fd;
   coroutine->posix_timer_write_fd_ = write_fd;
  
@@ -808,7 +868,7 @@ void Coroutine::Nanosleep(uint64_t ns) const {
 void Coroutine::CleanupPosixTimer() const {
   // This needs to be idempotent as it is called in the destructor and might have already
   // been called after a Wait has finished.
-  if (posix_timer_id_ != nullptr) {
+  if (posix_timer_active_) {
     // Disarm the timer first
     struct itimerspec its;
     its.it_value.tv_sec = 0;
@@ -817,7 +877,8 @@ void Coroutine::CleanupPosixTimer() const {
     its.it_interval.tv_nsec = 0;
     timer_settime(posix_timer_id_, 0, &its, nullptr);
     timer_delete(posix_timer_id_);
-    posix_timer_id_ = nullptr;
+    posix_timer_id_ = {};
+    posix_timer_active_ = false;
   }
   
   if (posix_timer_write_fd_ != -1) {
@@ -949,6 +1010,16 @@ void Coroutine::InvokeFunction() {
 #if defined(CO_ADDRESS_SANITIZER)
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
+  // The coroutine body has returned; the assembly trampoline (or the
+  // ucontext uc_link/getcontext+setcontext path) is about to longjmp/setcontext
+  // back to the scheduler.  Tell TSan we are switching fibers before that
+  // happens.  We use the no-sync flag because there is nothing the scheduler
+  // can synchronize with on a dying coroutine.
+#if defined(CO_THREAD_SANITIZER)
+  if (scheduler_.tsan_fiber_ != nullptr) {
+    __tsan_switch_to_fiber(scheduler_.tsan_fiber_, 0);
+  }
+#endif
 }
 
 // We use an intermediate function to do the invocation of
@@ -961,6 +1032,7 @@ void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
 CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
 void Coroutine::Resume(int value) const {
   if (aborted_) {
     // Cannot resume an aborted coroutine.
@@ -984,6 +1056,9 @@ void Coroutine::Resume(int value) const {
     __sanitizer_start_switch_fiber(&scheduler_.fake_stack_, stack_.data(),
                                    stack_.size());
 #endif
+    // Tell TSan we are about to switch from the scheduler to this
+    // coroutine's fiber before doing the actual stack switch below.
+    CO_TSAN_SWITCH_TO_FIBER(tsan_fiber_);
     SetState(State::kCoRunning);
     yielded_address_ = nullptr;
 #if CO_CTX_MODE == CO_CTX_SETJMP
@@ -1060,6 +1135,8 @@ void Coroutine::Resume(int value) const {
   case State::kCoWaiting:
     SetState(State::kCoRunning);
     wait_result_ = value;
+    // Switch TSan over to the coroutine's fiber before we resume it.
+    CO_TSAN_SWITCH_TO_FIBER(tsan_fiber_);
     SETCONTEXT(resume_);
     break;
   case State::kCoRunning:
@@ -1231,6 +1308,16 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 void CoroutineScheduler::Run() {
   running_ = true;
   co::scheduler = this; // Thread local.
+#if defined(CO_THREAD_SANITIZER)
+  // Capture the TSan fiber for the thread that runs the scheduler loop.  It
+  // has to be captured here (rather than in the constructor) because the
+  // scheduler may have been constructed on a different thread from the one
+  // that calls Run().  __tsan_get_current_fiber returns the implicit fiber
+  // associated with the calling thread.
+  if (tsan_fiber_ == nullptr) {
+    tsan_fiber_ = __tsan_get_current_fiber();
+  }
+#endif
 #if CO_POLL_MODE == CO_POLL_EPOLL
   std::vector<struct epoll_event> epoll_events;
 #endif

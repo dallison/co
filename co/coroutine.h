@@ -53,6 +53,18 @@
 #define CO_TIMER_EVENT 2
 #define CO_TIMER_POSIX 3
 
+// Event-fd backend selection (used by co::EventFd):
+// 1. CO_EVENT_EVENTFD - Linux eventfd (Linux only)
+// 2. CO_EVENT_KQUEUE  - macOS kqueue with EVFILT_USER (macOS only)
+// 3. CO_EVENT_PIPE    - non-blocking pipe pair (portable)
+//
+// You can override the default backend by defining CO_EVENT_MODE before
+// including this header (e.g. -DCO_EVENT_MODE=CO_EVENT_PIPE) so you can
+// exercise the portable pipe-based path on Linux/macOS.
+#define CO_EVENT_EVENTFD 1
+#define CO_EVENT_KQUEUE 2
+#define CO_EVENT_PIPE 3
+
 // Apple has deprecated user contexts so we can't use them
 // on MacOS.  Linux still has them and there's an issue with
 // using setjmp/longjmp on Linux when running with LLVM
@@ -79,6 +91,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_EVENT
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_KQUEUE
+#endif
 #include <csetjmp>
 
 #elif defined(__linux__)
@@ -96,6 +111,9 @@
 #include <ucontext.h>
 #define CO_POLL_MODE CO_POLL_EPOLL // Change this line to disable epoll
 #define CO_TIMER_MODE CO_TIMER_TIMERFD // Change this line to use POSIX timer instead
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_EVENTFD
+#endif
 
 #elif defined(__QNX__) || defined(__QNXNTO__)
 // QNX configuration
@@ -108,6 +126,9 @@
 #endif
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #else
 // Other OS, use the custom context switcher if available
 // or setjmp/longjmp if not.  The custom context switcher is only available
@@ -121,6 +142,9 @@
 #include <csetjmp>
 #define CO_POLL_MODE CO_POLL_POLL
 #define CO_TIMER_MODE CO_TIMER_POSIX // Use POSIX timer for other OSes
+#ifndef CO_EVENT_MODE
+#define CO_EVENT_MODE CO_EVENT_PIPE
+#endif
 #endif
 
 #include <poll.h>
@@ -189,6 +213,19 @@ void __sanitizer_start_switch_fiber(void **fake_stack_save, const void *bottom,
 
 void __sanitizer_finish_switch_fiber(void *fake_stack_save,
                                      const void **bottom_old, size_t *size_old);
+}
+#endif
+
+#if defined(CO_THREAD_SANITIZER)
+extern "C" {
+// Fiber switching API exposed by the ThreadSanitizer runtime.  We forward
+// declare the entry points we use rather than including <sanitizer/tsan_interface.h>
+// because that header is not always available on every toolchain.
+void *__tsan_get_current_fiber(void);
+void *__tsan_create_fiber(unsigned flags);
+void __tsan_destroy_fiber(void *fiber);
+void __tsan_switch_to_fiber(void *fiber, unsigned flags);
+void __tsan_set_fiber_name(void *fiber, const char *name);
 }
 #endif
 
@@ -311,6 +348,10 @@ struct WaitFd {
 // errors (use-after-return). The principal function of a coroutine is likely
 // to need to be prefixed with CO_DISABLE_ADDRESS_SANITIZER
 // (detect_sanitizers.h) to disable diagnostics related to its stack frame.
+//
+// ThreadSanitizer is also informed about every coroutine context switch via the
+// __tsan_switch_to_fiber API, so cooperative yields between coroutines and the
+// scheduler do not trigger spurious data-race reports.
 class Coroutine {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
@@ -615,7 +656,8 @@ protected:
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   mutable int posix_timer_write_fd_ = -1; // Write end of pipe for POSIX timer
-  mutable timer_t posix_timer_id_ = nullptr; // POSIX timer ID
+  mutable timer_t posix_timer_id_ = {}; // POSIX timer ID
+  mutable bool posix_timer_active_ = false;
   mutable int posix_timer_read_fd_ = -1; // Read end of pipe (timer fd)
 #endif
 
@@ -623,6 +665,12 @@ protected:
   std::function<std::string()> to_string_callback_;
 #if CO_HAVE_VALGRIND
   int valgrind_stack_id_ = -1;
+#endif
+#if defined(CO_THREAD_SANITIZER)
+  // Opaque per-coroutine fiber context owned by the TSan runtime.  Created in
+  // the constructor and destroyed in the destructor.  Switched to whenever the
+  // scheduler resumes this coroutine.
+  void *tsan_fiber_ = nullptr;
 #endif
 };
 
@@ -781,6 +829,13 @@ protected:
   absl::flat_hash_set<const Coroutine *> deletions_;
 #if defined(CO_ADDRESS_SANITIZER)
   void *fake_stack_ = nullptr;
+#endif
+#if defined(CO_THREAD_SANITIZER)
+  // TSan fiber identifying the thread that runs the scheduler loop.  Captured
+  // lazily on the first call to Run() (which is when we know which thread the
+  // scheduler is executing on) and switched to whenever a coroutine yields
+  // back to the scheduler.
+  void *tsan_fiber_ = nullptr;
 #endif
   std::atomic<bool> aborts_enabled_ = true;
   std::atomic<bool> abort_on_stop_ = false;

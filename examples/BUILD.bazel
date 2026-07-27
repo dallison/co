@@ -1,0 +1,9 @@
+package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "coroutine_exchange",
+    srcs = ["coroutine_exchange.cc"],
+    deps = ["//co:co"],
+)
