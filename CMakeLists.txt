@@ -114,3 +114,11 @@ set_target_properties(test_cpp20 PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 add_test(NAME test_cpp20 COMMAND test_cpp20)
+
+# --- Examples ---
+add_executable(coroutine_exchange
+    examples/coroutine_exchange.cc
+)
+target_link_libraries(coroutine_exchange PRIVATE
+    co
+)
