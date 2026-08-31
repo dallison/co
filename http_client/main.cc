@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits>
 #include <map>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -28,7 +29,7 @@ void Usage(void) {
 // Send data to the server from a coroutine.
 static bool SendToServer(co::Coroutine *c, int fd, const char *request,
                          size_t length) {
-  int offset = 0;
+  size_t offset = 0;
   const size_t kMaxLength = 1024;
   while (length > 0) {
     // Wait until we can send to the network.  This will yield to other
@@ -46,8 +47,8 @@ static bool SendToServer(co::Coroutine *c, int fd, const char *request,
     if (n == 0) {
       return false;
     }
-    length -= n;
-    offset += n;
+    length -= static_cast<size_t>(n);
+    offset += static_cast<size_t>(n);
   }
   return true;
 }
@@ -94,7 +95,8 @@ static size_t ReadHeaders(std::string &buffer, std::vector<std::string> &header,
     char *name = &buffer[i];
     while (i < buffer.size() && buffer[i] != ':') {
       // Convert name to upper case as they are case insensitive.
-      buffer[i] = toupper(buffer[i]);
+      buffer[i] = static_cast<char>(
+          ::toupper(static_cast<unsigned char>(buffer[i])));
       i++;
     }
     // No header value, end of headers.
@@ -109,7 +111,7 @@ static size_t ReadHeaders(std::string &buffer, std::vector<std::string> &header,
     }
     char *value = &buffer[i];
     while (i < buffer.size()) {
-      if (i < buffer.size() + 3 && buffer[i] == '\r') {
+      if (i + 2 < buffer.size() && buffer[i] == '\r') {
         // Check for continuation with a space as the first character on the
         // next line.  TAB too.
         if (buffer[i + 2] != ' ' && buffer[i + 2] != '\t') {
@@ -140,7 +142,7 @@ static size_t ReadContents(co::Coroutine *c, int fd, std::string &buffer,
       if (write_to_output) {
         fwrite(&buffer[i], 1, nbytes, stdout);
       }
-      length -= nbytes;
+      length -= static_cast<int>(nbytes);
       i += nbytes;
     } else {
       // No data in buffer, read some more into the buffer.
@@ -157,7 +159,7 @@ static size_t ReadContents(co::Coroutine *c, int fd, std::string &buffer,
         printf("done\n");
         break;
       }
-      buffer += std::string(buf, n);
+      buffer += std::string(buf, static_cast<size_t>(n));
     }
   }
   return i;
@@ -168,7 +170,8 @@ static size_t ReadChunkLength(co::Coroutine *c, int fd, std::string &buffer,
   for (;;) {
     char ch;
     if (i < buffer.size()) {
-      ch = toupper(buffer[i++]);
+      ch = static_cast<char>(
+          ::toupper(static_cast<unsigned char>(buffer[i++])));
     } else {
       // Fill the buffer with some more data.
       buffer.clear();
@@ -185,19 +188,20 @@ static size_t ReadChunkLength(co::Coroutine *c, int fd, std::string &buffer,
         // Didn't read anything, EOF on input.
         return i;
       }
-      buffer += std::string(buf, n);
+      buffer += std::string(buf, static_cast<size_t>(n));
       continue;
     }
     if (ch == '\r') {
       i++;
       break;
     }
+    int digit;
     if (ch > '9') {
-      ch = ch - 'A' + 10;
+      digit = ch - 'A' + 10;
     } else {
-      ch -= '0';
+      digit = ch - '0';
     }
-    *length = (*length << 4) | ch;
+    *length = (*length << 4) | digit;
   }
   return i;
 }
@@ -233,7 +237,7 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
                              .sin_len = sizeof(int),
 #endif
                              .sin_addr = {.s_addr = ipaddr}};
-  int e = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+  int e = connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
   if (e != 0) {
     close(fd);
     perror("connect");
@@ -244,7 +248,12 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
   int reqlen =
       snprintf(request, sizeof(request), "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n",
                filename.c_str(), server_name.c_str());
-  bool ok = SendToServer(c, fd, request, reqlen);
+  if (reqlen < 0 || static_cast<size_t>(reqlen) >= sizeof(request)) {
+    fprintf(stderr, "Failed to format HTTP request\n");
+    close(fd);
+    return;
+  }
+  bool ok = SendToServer(c, fd, request, static_cast<size_t>(reqlen));
   if (!ok) {
     fprintf(stderr, "Failed to send to server: %s\n", strerror(errno));
     close(fd);
@@ -272,7 +281,7 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
       return;
     }
     // Append to data buffer.
-    buffer += std::string(buf, n);
+    buffer += std::string(buf, static_cast<size_t>(n));
 
     // A blank line terminates the read.
     if (buffer.find("\r\n\r\n") != std::string::npos) {
@@ -300,8 +309,8 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
     fprintf(stderr, "%s Error: %d: ", protocol.c_str(), status_value);
     // Print all error strings.
     const char *sep = "";
-    for (size_t i = kError; i < header.size(); i++) {
-      std::string &s = header[i];
+    for (size_t err_idx = kError; err_idx < header.size(); err_idx++) {
+      std::string &s = header[err_idx];
       fprintf(stderr, "%s%s", sep, s.c_str());
       sep = " ";
     }
@@ -319,9 +328,16 @@ void Client(co::Coroutine *c, std::string server_name, in_addr_t ipaddr,
     if (it != http_headers.end() && it->second == "chunked") {
       is_chunked = true;
     } else {
-      auto it = http_headers.find("CONTENT-LENGTH");
-      if (it != http_headers.end()) {
-        content_length = (int)strtoll(it->second.c_str(), NULL, 10);
+      auto content_length_it = http_headers.find("CONTENT-LENGTH");
+      if (content_length_it != http_headers.end()) {
+        char *end = nullptr;
+        const long long parsed_length = strtoll(
+            content_length_it->second.c_str(), &end, 10);
+        if (end != content_length_it->second.c_str() && *end == '\0' &&
+            parsed_length >= 0 &&
+            parsed_length <= std::numeric_limits<int>::max()) {
+          content_length = static_cast<int>(parsed_length);
+        }
       }
     }
 
@@ -385,7 +401,13 @@ int main(int argc, const char *argv[]) {
     fprintf(stderr, "unknown host %s\n", host.c_str());
     exit(1);
   }
-  in_addr_t ipaddr = ((struct in_addr *)entry->h_addr_list[0])->s_addr;
+  in_addr host_addr{};
+  if (entry->h_length != static_cast<int>(sizeof(host_addr))) {
+    fprintf(stderr, "unexpected address length for host %s\n", host.c_str());
+    exit(1);
+  }
+  std::memcpy(&host_addr, entry->h_addr_list[0], sizeof(host_addr));
+  in_addr_t ipaddr = host_addr.s_addr;
 
   co::CoroutineScheduler scheduler;
   std::set<std::unique_ptr<co::Coroutine>> jobs;
