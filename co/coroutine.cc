@@ -13,6 +13,7 @@
 #include <cassert>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 
 #include "bitset.h"
 
@@ -105,6 +106,33 @@ constexpr bool kCoDebug = false;
 #endif
 
 namespace co {
+
+namespace {
+
+short PollEventsFromMask(uint32_t event_mask) {
+  if (event_mask > static_cast<uint32_t>(std::numeric_limits<short>::max())) {
+    abort();
+  }
+  return static_cast<short>(event_mask);
+}
+
+bool PollNfdsFromSize(size_t count, nfds_t *nfds) {
+  if (count > static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
+    return false;
+  }
+  *nfds = static_cast<nfds_t>(count);
+  return true;
+}
+
+bool FdToBitIndex(int fd, std::uint32_t *bit_index) {
+  if (fd < 0) {
+    return false;
+  }
+  *bit_index = static_cast<std::uint32_t>(fd);
+  return true;
+}
+
+} // namespace
 
 struct AbortException {};
 
@@ -280,30 +308,31 @@ asm(
 #endif
 // clang-format on
 
-Coroutine::Coroutine(CoroutineScheduler &scheduler, CoroutineFunction functor,
+Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
+                     CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(scheduler,
+    : Coroutine(coroutine_scheduler,
                 [functor = std::move(functor)](const Coroutine &c) {
                   functor(const_cast<Coroutine *>(&c));
                 },
                 std::move(name), interrupt_fd, autostart, stack_size,
                 user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &scheduler,
+Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
                      std::function<void()> functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
     : Coroutine(
-          scheduler,
+          coroutine_scheduler,
           [functor = std::move(functor)](const Coroutine &) { functor(); },
           std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &scheduler,
+Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
                      CoroutineFunctionRef functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
-    : scheduler_(scheduler), function_(std::move(functor)),
+    : scheduler_(coroutine_scheduler), function_(std::move(functor)),
       interrupt_fd_(dup(interrupt_fd)), user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name.empty()) {
@@ -647,13 +676,17 @@ int Coroutine::Poll(const std::vector<int> &fds, short event_mask) const {
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size() + 1);
   for (auto &fd : fds) {
-    pfds.push_back({.fd = fd, .events = short(event_mask), .revents = 0});
+    pfds.push_back({.fd = fd, .events = event_mask, .revents = 0});
   }
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     pfds.push_back(ifd);
   }
-  int ret = ::poll(pfds.data(), pfds.size(), 0);
+  nfds_t nfds = 0;
+  if (!PollNfdsFromSize(pfds.size(), &nfds)) {
+    return -1;
+  }
+  int ret = ::poll(pfds.data(), nfds, 0);
   if (ret <= 0) {
     return -1;
   }
@@ -673,7 +706,11 @@ int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     pfds.push_back(ifd);
   }
-  int ret = ::poll(pfds.data(), pfds.size(), 0);
+  nfds_t nfds = 0;
+  if (!PollNfdsFromSize(pfds.size(), &nfds)) {
+    return -1;
+  }
+  int ret = ::poll(pfds.data(), nfds, 0);
   if (ret <= 0) {
     return -1;
   }
@@ -692,7 +729,7 @@ int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
     wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
 #else
-  struct pollfd pfd = {.fd = fd, .events = short(event_mask)};
+  struct pollfd pfd = {.fd = fd, .events = PollEventsFromMask(event_mask)};
   wait_fds_.push_back(pfd);
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
@@ -721,7 +758,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   }
 #else
   for (auto &fd : fds) {
-    wait_fds_.push_back({.fd = fd, .events = short(event_mask)});
+    wait_fds_.push_back({.fd = fd, .events = PollEventsFromMask(event_mask)});
   }
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
@@ -741,7 +778,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
 
 int Coroutine::PollAndWait(int fd, uint32_t event_mask,
                            uint64_t timeout_ns) const {
-  int n = Poll({fd}, event_mask);
+  int n = Poll({fd}, PollEventsFromMask(event_mask));
   if (n != -1) {
     return n;
   }
@@ -750,7 +787,7 @@ int Coroutine::PollAndWait(int fd, uint32_t event_mask,
 
 int Coroutine::PollAndWait(const std::vector<int> &fds, uint32_t event_mask,
                            uint64_t timeout_ns) const {
-  int n = Poll(fds, event_mask);
+  int n = Poll(fds, PollEventsFromMask(event_mask));
   if (n != -1) {
     return n;
   }
@@ -780,7 +817,8 @@ int Coroutine::PollAndWait(const std::vector<WaitFd> &fds,
   std::vector<struct pollfd> pfds;
   pfds.reserve(fds.size());
   for (auto &fd : fds) {
-    pfds.push_back({.fd = fd.fd, .events = short(fd.events), .revents = 0});
+    pfds.push_back(
+        {.fd = fd.fd, .events = PollEventsFromMask(fd.events), .revents = 0});
   }
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
@@ -1354,7 +1392,9 @@ void CoroutineScheduler::Run() {
     // converting the epoll_event to a YieldedCoroutine.
 
     events.clear();
-    events.reserve(num_ready);
+    if (num_ready > 0) {
+      events.reserve(static_cast<size_t>(num_ready));
+    }
     for (int i = 0; i < num_ready; i++) {
       struct epoll_event &event = epoll_events[i];
       if (event.data.fd > max_fd) {
@@ -1392,8 +1432,11 @@ void CoroutineScheduler::Run() {
 #else
     // Poll mode.
     BuildPollFds(&poll_state_);
-    int num_ready =
-        ::poll(poll_state_.pollfds.data(), poll_state_.pollfds.size(), -1);
+    nfds_t nfds = 0;
+    if (!PollNfdsFromSize(poll_state_.pollfds.size(), &nfds)) {
+      return;
+    }
+    int num_ready = ::poll(poll_state_.pollfds.data(), nfds, -1);
     if (num_ready <= 0) {
       continue;
     }
@@ -1402,7 +1445,9 @@ void CoroutineScheduler::Run() {
     }
     // Copy all triggered pollfds into the events vector.
     events.clear();
-    events.reserve(num_ready);
+    if (num_ready > 0) {
+      events.reserve(static_cast<size_t>(num_ready));
+    }
     constexpr size_t kNumReservedFds = 2;
     for (size_t i = 0; i < poll_state_.pollfds.size(); i++) {
       if (poll_state_.pollfds[i].fd > max_fd) {
@@ -1465,7 +1510,7 @@ void CoroutineScheduler::Run() {
       if (index >= num_ready) {
         break;
       }
-      YieldedCoroutine *c = &events[index];
+      YieldedCoroutine *c = &events[static_cast<size_t>(index)];
       index++;
       if (c->fd == interrupt_fd_.poll_fd) {
         interrupt_fd_.Clear();
@@ -1482,7 +1527,8 @@ void CoroutineScheduler::Run() {
       }
       tick_count_++;
 
-      if (processed_fds.Contains(c->fd)) {
+      std::uint32_t fd_bit = 0;
+      if (FdToBitIndex(c->fd, &fd_bit) && processed_fds.Contains(fd_bit)) {
         // Since we can have more than one coroutine waiting for an fd we need
         // to check that the fd is still ready to prevent blocking.  We only do
         // this if the fd is in blocking mode.
@@ -1501,7 +1547,9 @@ void CoroutineScheduler::Run() {
           }
         }
       }
-      processed_fds.Set(c->fd);
+      if (FdToBitIndex(c->fd, &fd_bit)) {
+        processed_fds.Set(fd_bit);
+      }
 
       // Clear the event for the corouutine since we will be resuming
       // it.

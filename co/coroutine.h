@@ -190,10 +190,12 @@ using Context = co::CoroutineContext;
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <limits>
 #include <list>
 #include <set>
 #include <string>
@@ -230,6 +232,25 @@ void __tsan_set_fiber_name(void *fiber, const char *name);
 #endif
 
 namespace co {
+
+namespace detail {
+
+template <class Rep, class Period>
+inline uint64_t ChronoToNanoseconds(std::chrono::duration<Rep, Period> duration) {
+  using FloatingNanoseconds = std::chrono::duration<long double, std::nano>;
+  const long double count = FloatingNanoseconds(duration).count();
+  if (!(count > 0)) {
+    return 0;
+  }
+  const long double maximum =
+      static_cast<long double>(std::numeric_limits<uint64_t>::max());
+  if (count >= maximum) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return static_cast<uint64_t>(count);
+}
+
+} // namespace detail
 
 class CoroutineScheduler;
 class Coroutine;
@@ -472,40 +493,24 @@ public:
   template <class T, class Rep, class Period>
   int Wait(const T &fd, uint32_t events,
            std::chrono::duration<Rep, Period> duration) const {
-    return Wait(
-        fd, events,
-        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-            duration)
-            .count());
+    return Wait(fd, events, detail::ChronoToNanoseconds(duration));
   }
 
   template <class T, class Rep, class Period>
   int Wait(const T &fd, std::chrono::duration<Rep, Period> duration) const {
-    return Wait(
-        fd, POLLIN,
-        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-            duration)
-            .count());
+    return Wait(fd, POLLIN, detail::ChronoToNanoseconds(duration));
   }
 
   template <class T, class Rep, class Period>
   int PollAndWait(const T &fd, uint32_t events,
                   std::chrono::duration<Rep, Period> duration) const {
-    return PollAndWait(
-        fd, events,
-        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-            duration)
-            .count());
+    return PollAndWait(fd, events, detail::ChronoToNanoseconds(duration));
   }
 
   template <class T, class Rep, class Period>
   int PollAndWait(const T &fd,
                   std::chrono::duration<Rep, Period> duration) const {
-    return PollAndWait(
-        fd, POLLIN,
-        std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-            duration)
-            .count());
+    return PollAndWait(fd, POLLIN, detail::ChronoToNanoseconds(duration));
   }
 
   // Note this can cause memory leaks as destructors in the coroutine function
@@ -525,9 +530,7 @@ public:
 
   template <class Rep, class Period>
   void Sleep(std::chrono::duration<Rep, Period> duration) const {
-    Nanosleep(std::chrono::duration_cast<std::chrono::duration<Rep, std::nano>>(
-                  duration)
-                  .count());
+    Nanosleep(detail::ChronoToNanoseconds(duration));
   }
 
   // Abort the coroutine.  It will cause the current wait or sleep to throw an

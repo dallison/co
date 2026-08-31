@@ -13,44 +13,44 @@
 namespace co20 {
 
 TEST(Cpp20, Basic) {
-  Scheduler scheduler;
+  Scheduler sched;
   bool ran = false;
   
-  scheduler.Spawn([&ran](Coroutine& co) -> Task {
+  sched.Spawn([&ran](Coroutine&) -> Task {
     ran = true;
     co_return;
   }, "test");
   
-  scheduler.Run();
+  sched.Run();
   
   EXPECT_TRUE(ran);
 }
 
 TEST(Cpp20, Yield) {
-  Scheduler scheduler;
+  Scheduler sched;
   int count = 0;
   
-  scheduler.Spawn([&count](Coroutine& co) -> Task {
+  sched.Spawn([&count](Coroutine& co) -> Task {
     count++;
     co_await co.Yield();
     count++;
     co_return;
   }, "test");
   
-  scheduler.Run();
+  sched.Run();
   
   EXPECT_EQ(2, count);
 }
 
 TEST(Cpp20, Wait) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
   
   std::string result;
   bool reader_done = false;
   
-  scheduler.Spawn([&pipes, &result, &reader_done](Coroutine& co) -> Task {
+  sched.Spawn([&pipes, &result, &reader_done](Coroutine& co) -> Task {
     for (;;) {
       int fd = co_await co.Wait(pipes[0], POLLIN);
       if (fd != pipes[0]) break;
@@ -68,7 +68,7 @@ TEST(Cpp20, Wait) {
     co_return;
   }, "reader");
   
-  scheduler.Spawn([&pipes](Coroutine& co) -> Task {
+  sched.Spawn([&pipes](Coroutine& co) -> Task {
     for (int i = 0; i < 10; i++) {
       int fd = co_await co.Wait(pipes[1], POLLOUT);
       if (fd != pipes[1]) {
@@ -84,33 +84,33 @@ TEST(Cpp20, Wait) {
     co_return;
   }, "writer");
   
-  scheduler.Run();
+  sched.Run();
   
   EXPECT_TRUE(reader_done);
   EXPECT_EQ("ABCDEFGHIJ", result);
 }
 
 TEST(Cpp20, Sleep) {
-  Scheduler scheduler;
+  Scheduler sched;
   bool slept = false;
   
-  scheduler.Spawn([&slept](Coroutine& co) -> Task {
+  sched.Spawn([&slept](Coroutine& co) -> Task {
     co_await co.Sleep(1000000); // 1ms
     slept = true;
     co_return;
   }, "sleep_test");
   
-  scheduler.Run();
+  sched.Run();
   
   EXPECT_TRUE(slept);
 }
 
 TEST(Cpp20, Loop) {
-  Scheduler scheduler;
+  Scheduler sched;
   
   // Create 10 coroutines, each yielding 10 times
   for (int i = 0; i < 10; i++) {
-    scheduler.Spawn([](Coroutine& co) -> Task {
+    sched.Spawn([](Coroutine& co) -> Task {
       for (int j = 0; j < 10; j++) {
         co_await co.Yield();
       }
@@ -118,7 +118,7 @@ TEST(Cpp20, Loop) {
     }, "loop_coroutine_" + std::to_string(i));
   }
   
-  scheduler.Run();
+  sched.Run();
 }
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -127,7 +127,7 @@ TEST(Cpp20, Loop) {
 // allow multiple fds to be added to the epoll fd so we keep track of
 // the coroutines ourselves.
 TEST(Cpp20, MultipleFd) {
-  Scheduler scheduler;
+  Scheduler sched;
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
@@ -141,7 +141,7 @@ TEST(Cpp20, MultipleFd) {
   } state;
 
   // This will run first.
-  scheduler.Spawn([pipes, &state](Coroutine& co) -> Task {
+  sched.Spawn([pipes, &state](Coroutine& co) -> Task {
     int fd = co_await co.Wait(pipes[0], POLLIN);
     if (fd != pipes[0]) {
       co_return;
@@ -153,7 +153,7 @@ TEST(Cpp20, MultipleFd) {
   }, "foo");
 
   // This will run second.
-  scheduler.Spawn([pipes, &state](Coroutine& co) -> Task {
+  sched.Spawn([pipes, &state](Coroutine& co) -> Task {
     // Waiting on the same fd is supported.
     int fd = co_await co.Wait(pipes[0], POLLIN);
     if (fd != pipes[0]) {
@@ -168,7 +168,7 @@ TEST(Cpp20, MultipleFd) {
   }, "bar");
 
   // After c1 and c2 we will run this and it will wake up c1.
-  scheduler.Spawn([pipes, &state](Coroutine& co) -> Task {
+  sched.Spawn([pipes, &state](Coroutine& co) -> Task {
     // This will wake up foo but not bar.
     char buf = 'x';
     state.write_result = ::write(pipes[1], &buf, 1);
@@ -178,7 +178,7 @@ TEST(Cpp20, MultipleFd) {
     co_return;
   }, "baz");
 
-  scheduler.Run();
+  sched.Run();
   close(pipes[0]);
 
   EXPECT_TRUE(state.foo_woke);
@@ -189,14 +189,14 @@ TEST(Cpp20, MultipleFd) {
 }
 
 TEST(Cpp20, AbortYield) {
-  Scheduler scheduler;
+  Scheduler sched;
 
   struct TestState {
     bool aborted = false;
     Coroutine* coroutine_ptr = nullptr;
   } state;
 
-  scheduler.Spawn([&state](Coroutine& co) -> Task {
+  sched.Spawn([&state](Coroutine& co) -> Task {
     state.coroutine_ptr = &co;
     try {
       for (;;) {
@@ -208,7 +208,7 @@ TEST(Cpp20, AbortYield) {
     co_return;
   }, "sleeping_coroutine");
 
-  scheduler.Spawn([&state](Coroutine& co) -> Task {
+  sched.Spawn([&state](Coroutine& co) -> Task {
     co_await co.Sleep(100000000); // 100ms
     while (!state.coroutine_ptr) {
       co_await co.Yield();
@@ -220,12 +220,12 @@ TEST(Cpp20, AbortYield) {
     co_return;
   }, "abort_coroutine");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(state.aborted);
 }
 
 TEST(Cpp20, AbortSingle) {
-  Scheduler scheduler;
+  Scheduler sched;
 
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
@@ -235,7 +235,7 @@ TEST(Cpp20, AbortSingle) {
     Coroutine* coroutine_ptr = nullptr;
   } state;
 
-  scheduler.Spawn([pipes, &state](Coroutine& co) -> Task {
+  sched.Spawn([pipes, &state](Coroutine& co) -> Task {
     state.coroutine_ptr = &co;
     try {
       for (;;) {
@@ -247,7 +247,7 @@ TEST(Cpp20, AbortSingle) {
     co_return;
   }, "waiting_coroutine");
 
-  scheduler.Spawn([&state](Coroutine& co) -> Task {
+  sched.Spawn([&state](Coroutine& co) -> Task {
     co_await co.Sleep(100000000); // 100ms
     while (!state.coroutine_ptr) {
       co_await co.Yield();
@@ -259,7 +259,7 @@ TEST(Cpp20, AbortSingle) {
     co_return;
   }, "abort_coroutine");
 
-  scheduler.Run();
+  sched.Run();
   close(pipes[0]);
   close(pipes[1]);
   EXPECT_TRUE(state.aborted);
@@ -269,59 +269,59 @@ TEST(Cpp20, AbortSingle) {
 // --- Tests using the free-function API (co20::self, co20::Yield(), etc.) ---
 
 TEST(Cpp20Free, Self) {
-  Scheduler scheduler;
+  Scheduler sched;
   const Coroutine* captured_self = nullptr;
 
-  scheduler.Spawn([&captured_self]() -> Task {
+  sched.Spawn([&captured_self]() -> Task {
     captured_self = co20::self;
     co_return;
   }, "self_test");
 
-  scheduler.Run();
+  sched.Run();
 
   ASSERT_NE(nullptr, captured_self);
   EXPECT_EQ("self_test", captured_self->Name());
 }
 
 TEST(Cpp20Free, SchedulerAccess) {
-  Scheduler scheduler;
+  Scheduler sched;
   Scheduler* captured_scheduler = nullptr;
 
-  scheduler.Spawn([&captured_scheduler]() -> Task {
+  sched.Spawn([&captured_scheduler]() -> Task {
     captured_scheduler = co20::scheduler;
     co_return;
   }, "scheduler_test");
 
-  scheduler.Run();
+  sched.Run();
 
-  EXPECT_EQ(&scheduler, captured_scheduler);
+  EXPECT_EQ(&sched, captured_scheduler);
 }
 
 TEST(Cpp20Free, Yield) {
-  Scheduler scheduler;
+  Scheduler sched;
   int count = 0;
 
-  scheduler.Spawn([&count]() -> Task {
+  sched.Spawn([&count]() -> Task {
     count++;
     co_await co20::Yield();
     count++;
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_EQ(2, count);
 }
 
 TEST(Cpp20Free, Wait) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   std::string result;
   bool reader_done = false;
 
-  scheduler.Spawn([&pipes, &result, &reader_done]() -> Task {
+  sched.Spawn([&pipes, &result, &reader_done]() -> Task {
     for (;;) {
       int fd = co_await co20::Wait(pipes[0], POLLIN);
       if (fd != pipes[0]) break;
@@ -339,7 +339,7 @@ TEST(Cpp20Free, Wait) {
     co_return;
   }, "reader");
 
-  scheduler.Spawn([&pipes]() -> Task {
+  sched.Spawn([&pipes]() -> Task {
     for (int i = 0; i < 10; i++) {
       int fd = co_await co20::Wait(pipes[1], POLLOUT);
       if (fd != pipes[1]) {
@@ -354,62 +354,62 @@ TEST(Cpp20Free, Wait) {
     co_return;
   }, "writer");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(reader_done);
   EXPECT_EQ("ABCDEFGHIJ", result);
 }
 
 TEST(Cpp20Free, Sleep) {
-  Scheduler scheduler;
+  Scheduler sched;
   bool slept = false;
 
-  scheduler.Spawn([&slept]() -> Task {
+  sched.Spawn([&slept]() -> Task {
     co_await co20::Sleep(1000000ULL); // 1ms
     slept = true;
     co_return;
   }, "sleep_test");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(slept);
 }
 
 TEST(Cpp20Free, SleepChrono) {
-  Scheduler scheduler;
+  Scheduler sched;
   bool slept = false;
 
-  scheduler.Spawn([&slept]() -> Task {
+  sched.Spawn([&slept]() -> Task {
     co_await co20::Sleep(std::chrono::milliseconds(1));
     slept = true;
     co_return;
   }, "sleep_chrono_test");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(slept);
 }
 
 TEST(Cpp20Free, Millisleep) {
-  Scheduler scheduler;
+  Scheduler sched;
   bool slept = false;
 
-  scheduler.Spawn([&slept]() -> Task {
+  sched.Spawn([&slept]() -> Task {
     co_await co20::Millisleep(1);
     slept = true;
     co_return;
   }, "millisleep_test");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(slept);
 }
 
 TEST(Cpp20Free, Loop) {
-  Scheduler scheduler;
+  Scheduler sched;
 
   for (int i = 0; i < 10; i++) {
-    scheduler.Spawn([]() -> Task {
+    sched.Spawn([]() -> Task {
       for (int j = 0; j < 10; j++) {
         co_await co20::Yield();
       }
@@ -417,19 +417,19 @@ TEST(Cpp20Free, Loop) {
     }, "loop_coroutine_" + std::to_string(i));
   }
 
-  scheduler.Run();
+  sched.Run();
 }
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
 TEST(Cpp20Free, AbortWithSelf) {
-  Scheduler scheduler;
+  Scheduler sched;
 
   struct TestState {
     bool aborted = false;
     Coroutine* target = nullptr;
   } state;
 
-  scheduler.Spawn([&state]() -> Task {
+  sched.Spawn([&state]() -> Task {
     state.target = co20::self;
     try {
       for (;;) {
@@ -441,7 +441,7 @@ TEST(Cpp20Free, AbortWithSelf) {
     co_return;
   }, "target_coroutine");
 
-  scheduler.Spawn([&state]() -> Task {
+  sched.Spawn([&state]() -> Task {
     co_await co20::Sleep(std::chrono::milliseconds(100));
     while (!state.target) {
       co_await co20::Yield();
@@ -453,13 +453,13 @@ TEST(Cpp20Free, AbortWithSelf) {
     co_return;
   }, "abort_coroutine");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(state.aborted);
 }
 #endif
 
 TEST(Cpp20, InterruptFd) {
-  Scheduler scheduler;
+  Scheduler sched;
 
 #if defined(__linux__)
   int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -478,7 +478,7 @@ TEST(Cpp20, InterruptFd) {
   bool interrupted = false;
   int wait_result = -1;
 
-  scheduler.Spawn([&data_pipes, &interrupted, &wait_result](Coroutine& co) -> Task {
+  sched.Spawn([&data_pipes, &interrupted, &wait_result](Coroutine& co) -> Task {
     int fd = co_await co.Wait(data_pipes[0], POLLIN);
     wait_result = fd;
     if (fd == co.GetInterruptFd()) {
@@ -487,7 +487,7 @@ TEST(Cpp20, InterruptFd) {
     co_return;
   }, "waiting", efd);
 
-  scheduler.Spawn([
+  sched.Spawn([
 #if defined(__linux__)
     &efd
 #else
@@ -505,7 +505,7 @@ TEST(Cpp20, InterruptFd) {
     co_return;
   }, "interrupter");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(interrupted);
   EXPECT_NE(wait_result, data_pipes[0]);
@@ -521,7 +521,7 @@ TEST(Cpp20, InterruptFd) {
 }
 
 TEST(Cpp20, InterruptFdWithFreeFunction) {
-  Scheduler scheduler;
+  Scheduler sched;
 
 #if defined(__linux__)
   int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -540,7 +540,7 @@ TEST(Cpp20, InterruptFdWithFreeFunction) {
   bool interrupted = false;
   int wait_result = -1;
 
-  scheduler.Spawn([&data_pipes, &interrupted, &wait_result]() -> Task {
+  sched.Spawn([&data_pipes, &interrupted, &wait_result]() -> Task {
     int fd = co_await co20::Wait(data_pipes[0], POLLIN);
     wait_result = fd;
     if (fd == co20::self->GetInterruptFd()) {
@@ -549,7 +549,7 @@ TEST(Cpp20, InterruptFdWithFreeFunction) {
     co_return;
   }, "waiting", efd);
 
-  scheduler.Spawn([
+  sched.Spawn([
 #if defined(__linux__)
     &efd
 #else
@@ -567,7 +567,7 @@ TEST(Cpp20, InterruptFdWithFreeFunction) {
     co_return;
   }, "interrupter");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(interrupted);
   EXPECT_NE(wait_result, data_pipes[0]);
@@ -583,7 +583,7 @@ TEST(Cpp20, InterruptFdWithFreeFunction) {
 }
 
 TEST(Cpp20, InterruptFdDataFirst) {
-  Scheduler scheduler;
+  Scheduler sched;
 
 #if defined(__linux__)
   int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -602,7 +602,7 @@ TEST(Cpp20, InterruptFdDataFirst) {
   bool got_data = false;
   int wait_result = -1;
 
-  scheduler.Spawn([&data_pipes, &got_data, &wait_result](Coroutine& co) -> Task {
+  sched.Spawn([&data_pipes, &got_data, &wait_result](Coroutine& co) -> Task {
     int fd = co_await co.Wait(data_pipes[0], POLLIN);
     wait_result = fd;
     if (fd == data_pipes[0]) {
@@ -613,14 +613,14 @@ TEST(Cpp20, InterruptFdDataFirst) {
     co_return;
   }, "waiting", efd);
 
-  scheduler.Spawn([&data_pipes](Coroutine& co) -> Task {
+  sched.Spawn([&data_pipes](Coroutine& co) -> Task {
     co_await co.Yield();
     char c = 'D';
     (void)write(data_pipes[1], &c, 1);
     co_return;
   }, "writer");
 
-  scheduler.Run();
+  sched.Run();
 
   EXPECT_TRUE(got_data);
   EXPECT_EQ(wait_result, data_pipes[0]);
@@ -643,15 +643,15 @@ ValueTask<int> AddAsync(Coroutine& co, int a, int b) {
 }
 
 TEST(Cpp20ValueTask, BasicReturn) {
-  Scheduler scheduler;
+  Scheduler sched;
   int result = 0;
 
-  scheduler.Spawn([&result](Coroutine& co) -> Task {
+  sched.Spawn([&result](Coroutine& co) -> Task {
     result = co_await AddAsync(co, 3, 4);
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ(7, result);
 }
 
@@ -663,25 +663,25 @@ ValueTask<std::string> ReadFromPipeAsync(Coroutine& co, int read_fd) {
     char buf[64];
     ssize_t n = read(read_fd, buf, sizeof(buf));
     if (n <= 0) break;
-    data.append(buf, n);
+    data.append(buf, static_cast<size_t>(n));
   }
   co_return data;
 }
 
 TEST(Cpp20ValueTask, WithWait) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   std::string result;
 
-  scheduler.Spawn([&pipes, &result](Coroutine& co) -> Task {
+  sched.Spawn([&pipes, &result](Coroutine& co) -> Task {
     result = co_await ReadFromPipeAsync(co, pipes[0]);
     close(pipes[0]);
     co_return;
   }, "reader");
 
-  scheduler.Spawn([&pipes](Coroutine& co) -> Task {
+  sched.Spawn([&pipes](Coroutine& co) -> Task {
     co_await co.Yield();
     const char* msg = "hello";
     (void)write(pipes[1], msg, 5);
@@ -690,7 +690,7 @@ TEST(Cpp20ValueTask, WithWait) {
     co_return;
   }, "writer");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ("hello", result);
 }
 
@@ -706,15 +706,15 @@ ValueTask<int> OuterCompute(Coroutine& co, int x) {
 }
 
 TEST(Cpp20ValueTask, Nested) {
-  Scheduler scheduler;
+  Scheduler sched;
   int result = 0;
 
-  scheduler.Spawn([&result](Coroutine& co) -> Task {
+  sched.Spawn([&result](Coroutine& co) -> Task {
     result = co_await OuterCompute(co, 5);
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ(11, result);
 }
 
@@ -725,17 +725,17 @@ ValueTask<void> IncrementAsync(Coroutine& co, int& counter) {
 }
 
 TEST(Cpp20ValueTask, VoidReturn) {
-  Scheduler scheduler;
+  Scheduler sched;
   int counter = 0;
 
-  scheduler.Spawn([&counter](Coroutine& co) -> Task {
+  sched.Spawn([&counter](Coroutine& co) -> Task {
     co_await IncrementAsync(co, counter);
     co_await IncrementAsync(co, counter);
     co_await IncrementAsync(co, counter);
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ(3, counter);
 }
 
@@ -747,13 +747,13 @@ ValueTask<void> WaitAndWrite(Coroutine& co, int write_fd) {
 }
 
 TEST(Cpp20ValueTask, VoidWithWait) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   char read_buf = 0;
 
-  scheduler.Spawn([&pipes, &read_buf](Coroutine& co) -> Task {
+  sched.Spawn([&pipes, &read_buf](Coroutine& co) -> Task {
     co_await WaitAndWrite(co, pipes[1]);
     close(pipes[1]);
     int fd = co_await co.Wait(pipes[0], POLLIN);
@@ -763,7 +763,7 @@ TEST(Cpp20ValueTask, VoidWithWait) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ('V', read_buf);
 }
 
@@ -773,30 +773,30 @@ ValueTask<int> AddWithFreeFunction(int a, int b) {
 }
 
 TEST(Cpp20ValueTask, FreeFunctions) {
-  Scheduler scheduler;
+  Scheduler sched;
   int result = 0;
 
-  scheduler.Spawn([&result]() -> Task {
+  sched.Spawn([&result]() -> Task {
     result = co_await AddWithFreeFunction(10, 20);
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ(30, result);
 }
 
 TEST(Cpp20ValueTask, MultipleSequentialCalls) {
-  Scheduler scheduler;
+  Scheduler sched;
   int sum = 0;
 
-  scheduler.Spawn([&sum](Coroutine& co) -> Task {
+  sched.Spawn([&sum](Coroutine& co) -> Task {
     for (int i = 1; i <= 5; i++) {
       sum += co_await AddAsync(co, i, 0);
     }
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_EQ(15, sum);
 }
 
@@ -806,13 +806,13 @@ ValueTask<bool> CheckPipeReady(Coroutine& co, int read_fd, uint64_t timeout_ns) 
 }
 
 TEST(Cpp20ValueTask, BoolReturn) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool pipe_ready = false;
 
-  scheduler.Spawn([&pipes, &pipe_ready](Coroutine& co) -> Task {
+  sched.Spawn([&pipes, &pipe_ready](Coroutine& co) -> Task {
     // Write data first so the pipe is ready.
     char c = 'x';
     (void)write(pipes[1], &c, 1);
@@ -823,18 +823,18 @@ TEST(Cpp20ValueTask, BoolReturn) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(pipe_ready);
 }
 
 TEST(Cpp20WaitTimeout, DataArrivesBeforeTimeout) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool success = false;
 
-  scheduler.Spawn([&](Coroutine& co) -> Task {
+  sched.Spawn([&](Coroutine& co) -> Task {
     char c = 'x';
     (void)write(pipes[1], &c, 1);
     co_await co.Yield();
@@ -847,18 +847,18 @@ TEST(Cpp20WaitTimeout, DataArrivesBeforeTimeout) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(success);
 }
 
 TEST(Cpp20WaitTimeout, TimeoutExpires) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool timed_out = false;
 
-  scheduler.Spawn([&](Coroutine& co) -> Task {
+  sched.Spawn([&](Coroutine& co) -> Task {
     int fd = co_await co.Wait(pipes[0], POLLIN, 50000000ULL);
     timed_out = (fd != pipes[0]);
 
@@ -867,18 +867,18 @@ TEST(Cpp20WaitTimeout, TimeoutExpires) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(timed_out);
 }
 
 TEST(Cpp20WaitTimeout, FreeFunctionTimeout) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool timed_out = false;
 
-  scheduler.Spawn([&]() -> Task {
+  sched.Spawn([&]() -> Task {
     int fd = co_await co20::Wait(pipes[0], POLLIN, 50000000ULL);
     timed_out = (fd != pipes[0]);
 
@@ -887,18 +887,18 @@ TEST(Cpp20WaitTimeout, FreeFunctionTimeout) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(timed_out);
 }
 
 TEST(Cpp20WaitTimeout, ValueTaskWithTimeout) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool result = true;
 
-  scheduler.Spawn([&](Coroutine& co) -> Task {
+  sched.Spawn([&](Coroutine& co) -> Task {
     result = co_await CheckPipeReady(co, pipes[0], 50000000ULL);
 
     close(pipes[0]);
@@ -906,18 +906,18 @@ TEST(Cpp20WaitTimeout, ValueTaskWithTimeout) {
     co_return;
   }, "test");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_FALSE(result);
 }
 
 TEST(Cpp20WaitTimeout, DataArrivesDuringWait) {
-  Scheduler scheduler;
+  Scheduler sched;
   int pipes[2];
   ASSERT_EQ(0, pipe(pipes));
 
   bool success = false;
 
-  scheduler.Spawn([&](Coroutine& co) -> Task {
+  sched.Spawn([&](Coroutine& co) -> Task {
     // Spawn a helper that writes after a short delay.
     co_await co.Yield();
 
@@ -929,14 +929,14 @@ TEST(Cpp20WaitTimeout, DataArrivesDuringWait) {
     co_return;
   }, "waiter");
 
-  scheduler.Spawn([&](Coroutine& co) -> Task {
+  sched.Spawn([&](Coroutine& co) -> Task {
     co_await co.Sleep(std::chrono::milliseconds(20));
     char c = 'x';
     (void)write(pipes[1], &c, 1);
     co_return;
   }, "writer");
 
-  scheduler.Run();
+  sched.Run();
   EXPECT_TRUE(success);
 }
 
