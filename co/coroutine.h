@@ -45,6 +45,8 @@
 #include <vector>
 #include <utility>
 
+#include "toolbelt/poller.h"
+
 namespace co {
 
 class CoroutineScheduler;
@@ -79,11 +81,7 @@ struct CoroutineOptions {
 #if CO_POLL_MODE == CO_POLL_EPOLL
 // This is to provide the epoll equivalent of waiting for a set
 // of pollfds
-struct WaitFd {
-  WaitFd(int f, uint32_t e) : fd(f), events(e) {}
-  int fd;
-  uint32_t events;
-};
+using WaitFd = toolbelt::WaitFd;
 #endif
 
 // This is a Coroutine.  It executes its function (pointer to a function
@@ -107,19 +105,14 @@ struct WaitFd {
 // ThreadSanitizer is also informed about every coroutine context switch via the
 // __tsan_switch_to_fiber API, so cooperative yields between coroutines and the
 // scheduler do not trigger spurious data-race reports.
-class Coroutine {
+class Coroutine : public toolbelt::Poller {
 public:
-  Coroutine(const Coroutine&) = delete;
-  Coroutine(Coroutine&&) = delete;
-  Coroutine& operator=(const Coroutine&) = delete;
-  Coroutine& operator=(Coroutine&&) = delete;
-  virtual ~Coroutine() = default;
 
   // Start a coroutine running if it is not already running,
   virtual void Start() = 0;
 
   // Yield control to another coroutine.
-  virtual void Yield() const = 0;
+  // virtual void Poller::Yield() const = 0;
   virtual void YieldToScheduler() const = 0;
 
   // Call another coroutine and store the result.
@@ -309,7 +302,7 @@ public:
   virtual void Exit() const = 0;
 
   // Sleeping functions.
-  virtual void Nanosleep(uint64_t ns) const = 0;
+  // virtual void Poller::Nanosleep(uint64_t ns) const = 0;
   void Millisleep(time_t msecs) const {
     Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
   }
@@ -377,9 +370,9 @@ protected:
       name_(std::move(name)),
       interrupt_fd_(interrupt_fd), stack_(stack_size), user_data_(user_data) {}
 
-  virtual void AddToUserWaitFds(int fd, uint32_t event_mask) const = 0;
-  virtual int WaitOnUserWaitFds(uint64_t timeout_ns) const = 0;
-  virtual int PollWithMutableFds(std::vector<struct pollfd> &fds) const = 0;
+  // virtual void Poller::AddToUserWaitFds(int fd, uint32_t event_mask) const = 0;
+  // virtual int Poller::WaitOnUserWaitFds(uint64_t timeout_ns) const = 0;
+  // virtual int Poller::PollWithMutableFds(std::vector<struct pollfd> &fds) const = 0;
   virtual void CallNonTemplate(ScheduledCoroutine &c) const = 0;
 
   enum class State {

@@ -7,3 +7,14 @@ bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "abseil-cpp", version = "20250814.1")
 bazel_dep(name = "googletest", version = "1.17.0.bcr.2")
 bazel_dep(name = "rules_cc", version = "0.2.16")
+
+bazel_dep(name = "cpp_toolbelt", version = "2.1.3")
+git_override(
+    module_name = "cpp_toolbelt",
+    commit = "87722c391d6ecc06b6b2e35120bf97cbdfc918e4",
+    remote = "https://github.com/mikael-s-persson/cpp_toolbelt.git",
+)
+# local_path_override(
+#     module_name = "cpp_toolbelt",
+#     path = "../cpp_toolbelt",
+# )

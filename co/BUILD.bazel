@@ -22,6 +22,9 @@ cc_library(
     hdrs = [
         "coroutine.h",
     ],
+    deps = [
+        "@cpp_toolbelt//toolbelt",
+    ],
 )
 
 cc_library(
