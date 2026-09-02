@@ -1,5 +1,5 @@
 #include "absl/status/status_matchers.h"
-#include "co/coroutine.h"
+#include "co/coroutine_scheduler.h"
 #include <gtest/gtest.h>
 
 #define VAR(a) a##__COUNTER__
@@ -19,7 +19,7 @@
 
 TEST(CoroutineTest, Basic) {
   co::CoroutineScheduler scheduler;
-  co::Coroutine c1(scheduler, [](co::Coroutine *c) {
+  co::ScheduledCoroutine c1(scheduler, [](co::Coroutine *c) {
     for (int i = 0; i < 10; i++) {
       std::cerr << "yielding " << i << std::endl;
       c->Yield();
@@ -34,7 +34,7 @@ TEST(CoroutineTest, Loop) {
   std::vector<std::unique_ptr<co::Coroutine>> coroutines;
   for (int i = 0; i < 10; i++) {
     coroutines.push_back(
-        std::make_unique<co::Coroutine>(scheduler, [](co::Coroutine *c) {
+        std::make_unique<co::ScheduledCoroutine>(scheduler, [](co::Coroutine *c) {
           for (int i = 0; i < 10; i++) {
             c->Yield();
           }
@@ -45,7 +45,7 @@ TEST(CoroutineTest, Loop) {
 
 TEST(CoroutineTest, Sleep) {
   co::CoroutineScheduler scheduler;
-  co::Coroutine c1(scheduler, [](co::Coroutine *c) {
+  co::ScheduledCoroutine c1(scheduler, [](co::Coroutine *c) {
     for (int i = 0; i < 10; i++) {
       std::cerr << "Sleeping " << i << std::endl;
       c->Millisleep(100);
@@ -62,7 +62,7 @@ TEST(CoroutinesTest, Wait) {
   std::string result;
 
   ASSERT_EQ(0, pipe(pipes));
-  co::Coroutine reader(scheduler, [&pipes, &result](co::Coroutine *c) {
+  co::ScheduledCoroutine reader(scheduler, [&pipes, &result](co::Coroutine *c) {
     for (;;) {
       int fd = c->Wait(pipes[0], POLLIN);
       ASSERT_EQ(pipes[0], fd);
@@ -77,7 +77,7 @@ TEST(CoroutinesTest, Wait) {
     (void)close(pipes[0]);
   });
 
-  co::Coroutine writer(scheduler, [&pipes](co::Coroutine *c) {
+  co::ScheduledCoroutine writer(scheduler, [&pipes](co::Coroutine *c) {
     for (int i = 0; i < 10; i++) {
       int fd = c->Wait(pipes[1], POLLOUT);
       ASSERT_EQ(pipes[1], fd);
@@ -105,7 +105,7 @@ TEST(CoroutinesTest, MultipleFd) {
   ASSERT_EQ(0, pipe(pipes));
 
   // This will run first.
-  co::Coroutine c1(
+  co::ScheduledCoroutine c1(
       scheduler,
       [pipes](co::Coroutine *c) {
         ASSERT_EQ(pipes[0], c->Wait(pipes[0], POLLIN));
@@ -116,7 +116,7 @@ TEST(CoroutinesTest, MultipleFd) {
       "foo");
 
   // This will run second.
-  co::Coroutine c2(
+  co::ScheduledCoroutine c2(
       scheduler,
       [pipes](co::Coroutine *c) {
         // Waiting on the same fd is supported.
@@ -133,7 +133,7 @@ TEST(CoroutinesTest, MultipleFd) {
       "bar");
 
   // After c1 and c2 we will run this and it will wake up c1.
-  co::Coroutine c3(
+  co::ScheduledCoroutine c3(
       scheduler,
       [pipes](co::Coroutine *c) {
         // This will wake up foo but not bar.

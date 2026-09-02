@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "co/coroutine.h"
+#include "co/coroutine_scheduler.h"
 #include <csignal>
 #include <ctype.h>
 #include <errno.h>
@@ -290,7 +290,7 @@ void Listener(co::Coroutine *c) {
     }
 
     // Make a coroutine to handle the connection.
-    coroutines.insert(std::make_unique<co::Coroutine>(
+    coroutines.insert(std::make_unique<co::ScheduledCoroutine>(
         c->Scheduler(), [fd, sender, sender_len](co::Coroutine *c) {
           Server(c, fd, sender, sender_len);
         }));
@@ -304,7 +304,7 @@ int main(int argc, const char *argv[]) {
   signal(SIGPIPE, SIG_IGN);
   signal(SIGQUIT, Signal);
 
-  co::Coroutine listener(scheduler, Listener, "listener");
+  co::ScheduledCoroutine listener(scheduler, Listener, "listener");
 
   // Run the main loop
   scheduler.Run();

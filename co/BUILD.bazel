@@ -18,6 +18,13 @@ config_setting(
 )
 
 cc_library(
+    name = "co_api",
+    hdrs = [
+        "coroutine.h",
+    ],
+)
+
+cc_library(
     name = "co",
     srcs = [
         "context.S",
@@ -26,7 +33,7 @@ cc_library(
     hdrs = [
         "bitset.h",
         "context.h",
-        "coroutine.h",
+        "coroutine_scheduler.h",
         "detect_sanitizers.h",
     ],
     copts = [
@@ -38,6 +45,7 @@ cc_library(
         "//:macos_default": [],
         "//conditions:default": ["@abseil-cpp//absl/container:flat_hash_map"],
     }) + [
+        ":co_api",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
