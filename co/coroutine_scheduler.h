@@ -524,7 +524,7 @@ private:
 
 struct PollState {
   std::vector<struct pollfd> pollfds;
-  std::vector<Coroutine *> coroutines;
+  std::vector<ScheduledCoroutine *> coroutines;
 };
 
 class CoroutineScheduler {
