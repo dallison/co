@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-#include "co/coroutine.h"
+#include "co/coroutine_scheduler.h"
 
 using namespace co;
 
@@ -17,9 +17,9 @@ void Test(Coroutine *c) {
 
 int main() {
   CoroutineScheduler sched;
-  std::vector<std::unique_ptr<Coroutine>> coroutines;
+  std::vector<std::unique_ptr<ScheduledCoroutine>> coroutines;
   for (int i = 0; i < 1000; i++) {
-    coroutines.push_back(std::make_unique<Coroutine>(sched, Test));
+    coroutines.push_back(std::make_unique<ScheduledCoroutine>(sched, Test));
   }
   sched.Run();
 }

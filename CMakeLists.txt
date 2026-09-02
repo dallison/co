@@ -50,9 +50,15 @@ FetchContent_MakeAvailable(googletest)
 
 # --- co Library Target ---
 # Corresponds to //:co in Bazel
+add_library(co_api STATIC
+    co/coroutine.h
+)
+
+# --- co Library Target ---
+# Corresponds to //:co in Bazel
 add_library(co STATIC
     co/coroutine.cc
-    co/coroutine.h
+    co/coroutine_scheduler.h
     co/bitset.h
     co/context.S
     co/context.h
@@ -66,6 +72,7 @@ target_include_directories(co PUBLIC
 
 # Link against Abseil dependencies
 target_link_libraries(co PUBLIC
+    co_api
     absl::base
     absl::synchronization # Used by mutex, condition, etc.
     absl::time # Used by channel, future (for timeouts)

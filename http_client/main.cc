@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "co/coroutine.h"
+#include "co/coroutine_scheduler.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -423,7 +423,7 @@ int main(int argc, const char *argv[]) {
   // Run all the jobs in parallel.  They will be removed from the
   // jobs set when they complete.
   for (int i = 0; i < num_jobs; i++) {
-    jobs.insert(std::make_unique<co::Coroutine>(
+    jobs.insert(std::make_unique<co::ScheduledCoroutine>(
         scheduler, [ipaddr, host, filename](co::Coroutine *c) {
           Client(c, host, ipaddr, filename);
         }));

@@ -2,7 +2,7 @@
 // All Rights Reserved
 // See LICENSE file for licensing information.
 
-#include "co/coroutine.h"
+#include "co/coroutine_scheduler.h"
 #include "co/detect_sanitizers.h"
 
 #include <stdlib.h>
@@ -308,42 +308,37 @@ asm(
 #endif
 // clang-format on
 
-Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
-                     CoroutineFunction functor,
+ScheduledCoroutine::ScheduledCoroutine(CoroutineScheduler &parent, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
                      size_t stack_size, void *user_data)
-    : Coroutine(coroutine_scheduler,
+    : ScheduledCoroutine(parent,
                 [functor = std::move(functor)](const Coroutine &c) {
                   functor(const_cast<Coroutine *>(&c));
                 },
                 std::move(name), interrupt_fd, autostart, stack_size,
                 user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
+ScheduledCoroutine::ScheduledCoroutine(CoroutineScheduler &parent,
                      std::function<void()> functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
-    : Coroutine(
-          coroutine_scheduler,
+    : ScheduledCoroutine(
+          parent,
           [functor = std::move(functor)](const Coroutine &) { functor(); },
           std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
 
-Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
+ScheduledCoroutine::ScheduledCoroutine(CoroutineScheduler &parent,
                      CoroutineFunctionRef functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
-    : scheduler_(coroutine_scheduler), function_(std::move(functor)),
-      interrupt_fd_(dup(interrupt_fd)), user_data_(user_data) {
+    : Coroutine(parent, std::move(functor), std::move(name),
+                    dup(interrupt_fd), stack_size, user_data) {
   id_ = scheduler_.AllocateId();
-  if (name.empty()) {
+  if (name_.empty()) {
     char buf[256];
     snprintf(buf, sizeof(buf), "co-%d", id_);
     name_ = buf;
-  } else {
-    name_ = std::move(name);
   }
-
-  stack_.resize(stack_size);
 
 #if CO_CTX_MODE == CO_CTX_UCONTEXT
   getcontext(&resume_);
@@ -398,7 +393,7 @@ Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
   }
 }
 
-Coroutine::~Coroutine() {
+ScheduledCoroutine::~ScheduledCoroutine() {
   event_fd_.Close();
   abort_fd_.Close();
 #if CO_TIMER_MODE == CO_TIMER_POSIX
@@ -417,7 +412,7 @@ Coroutine::~Coroutine() {
 #endif
 }
 
-const char *Coroutine::StateName(State state) {
+const char *ScheduledCoroutine::StateName(State state) {
   switch (state) {
   case State::kCoDead:
     return "dead";
@@ -435,7 +430,7 @@ const char *Coroutine::StateName(State state) {
   return "unknown";
 }
 
-void Coroutine::SetState(State state) const {
+void ScheduledCoroutine::SetState(State state) const {
   if (state == state_) {
     return;
   }
@@ -490,14 +485,14 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
-void Coroutine::Exit() const {
+void ScheduledCoroutine::Exit() const {
   // Tell TSan we are leaving the coroutine fiber and returning to the
   // scheduler before we actually switch stacks.
   CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);
   SETCONTEXT(exit_);
 }
 
-void Coroutine::Start() {
+void ScheduledCoroutine::Start() {
   if (state_ == State::kCoNew) {
     SetState(State::kCoReady);
   }
@@ -617,7 +612,7 @@ int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
 #endif
 }
 
-int Coroutine::EndOfWait(int timer_fd) const {
+int ScheduledCoroutine::EndOfWait(int timer_fd) const {
   wait_fds_.clear();
   if (timer_fd != -1) {
 #if CO_TIMER_MODE == CO_TIMER_POSIX
@@ -641,7 +636,7 @@ int Coroutine::EndOfWait(int timer_fd) const {
   return wait_result_;
 }
 
-int Coroutine::AddTimeout(uint64_t timeout_ns) const {
+int ScheduledCoroutine::AddTimeout(uint64_t timeout_ns) const {
   int timer_fd = -1;
   if (timeout_ns > 0) {
     timer_fd = MakeTimer(this, timeout_ns);
@@ -655,7 +650,7 @@ int Coroutine::AddTimeout(uint64_t timeout_ns) const {
   return timer_fd;
 }
 
-void Coroutine::AddAbortFd() const {
+void ScheduledCoroutine::AddAbortFd() const {
   if (!scheduler_.aborts_enabled_) {
     return;
   }
@@ -670,51 +665,22 @@ void Coroutine::AddAbortFd() const {
 #endif
 }
 
-int Coroutine::Poll(const std::vector<int> &fds, short event_mask) const {
+int ScheduledCoroutine::PollWithMutableFds(std::vector<struct pollfd> &fds) const {
   // We use poll here regardless of the CO_POLL_MODE since it's just
   // a simple check of the fd status.
-  std::vector<struct pollfd> pfds;
-  pfds.reserve(fds.size() + 1);
-  for (auto &fd : fds) {
-    pfds.push_back({.fd = fd, .events = event_mask, .revents = 0});
-  }
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
-    pfds.push_back(ifd);
+    fds.push_back(ifd);
   }
   nfds_t nfds = 0;
-  if (!PollNfdsFromSize(pfds.size(), &nfds)) {
+  if (!PollNfdsFromSize(fds.size(), &nfds)) {
     return -1;
   }
-  int ret = ::poll(pfds.data(), nfds, 0);
+  int ret = ::poll(fds.data(), nfds, 0);
   if (ret <= 0) {
     return -1;
   }
-  for (auto &pfd : pfds) {
-    if (pfd.revents & (event_mask | POLLOUT)) {
-      return pfd.fd;
-    }
-  }
-  return -1;
-}
-
-int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
-  // We use poll here regardless of the CO_POLL_MODE since it's just
-  // a simple check of the fd status.
-  std::vector<struct pollfd> pfds = fds;
-  if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
-    pfds.push_back(ifd);
-  }
-  nfds_t nfds = 0;
-  if (!PollNfdsFromSize(pfds.size(), &nfds)) {
-    return -1;
-  }
-  int ret = ::poll(pfds.data(), nfds, 0);
-  if (ret <= 0) {
-    return -1;
-  }
-  for (auto &pfd : pfds) {
+  for (auto &pfd : fds) {
     if (pfd.revents & (pfd.events | POLLOUT)) {
       return pfd.fd;
     }
@@ -722,44 +688,21 @@ int Coroutine::Poll(const std::vector<struct pollfd> &fds) const {
   return -1;
 }
 
-int Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) const {
+
+void ScheduledCoroutine::AddToUserWaitFds(int fd, uint32_t event_mask) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
-  if (interrupt_fd_ != -1) {
-    wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
-  }
 #else
-  struct pollfd pfd = {.fd = fd, .events = PollEventsFromMask(event_mask)};
-  wait_fds_.push_back(pfd);
-  if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
-    wait_fds_.push_back(ifd);
-  }
+  wait_fds_.push_back({.fd = fd, .events = PollEventsFromMask(event_mask)});
 #endif
-
-  AddAbortFd();
-  int timer_fd = AddTimeout(timeout_ns);
-  yielded_address_ = __builtin_return_address(0);
-  last_tick_ = scheduler_.TickCount();
-  SetState(State::kCoWaiting);
-  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
-  // Get here when resumed.
-  return EndOfWait(timer_fd);
 }
 
-int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
-                    uint64_t timeout_ns) const {
+int ScheduledCoroutine::WaitOnUserWaitFds(uint64_t timeout_ns) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  for (auto &fd : fds) {
-    wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
-  }
   if (interrupt_fd_ != -1) {
     wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
   }
 #else
-  for (auto &fd : fds) {
-    wait_fds_.push_back({.fd = fd, .events = PollEventsFromMask(event_mask)});
-  }
   if (interrupt_fd_ != -1) {
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
     wait_fds_.push_back(ifd);
@@ -776,119 +719,7 @@ int Coroutine::Wait(const std::vector<int> &fds, uint32_t event_mask,
   return EndOfWait(timer_fd);
 }
 
-int Coroutine::PollAndWait(int fd, uint32_t event_mask,
-                           uint64_t timeout_ns) const {
-  int n = Poll({fd}, PollEventsFromMask(event_mask));
-  if (n != -1) {
-    return n;
-  }
-  return Wait(fd, event_mask, timeout_ns);
-}
-
-int Coroutine::PollAndWait(const std::vector<int> &fds, uint32_t event_mask,
-                           uint64_t timeout_ns) const {
-  int n = Poll(fds, PollEventsFromMask(event_mask));
-  if (n != -1) {
-    return n;
-  }
-  return Wait(fds, event_mask, timeout_ns);
-}
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-int Coroutine::Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) const {
-  for (auto &fd : fds) {
-    wait_fds_.push_back(YieldedCoroutine(this, fd.fd, fd.events));
-  }
-  if (interrupt_fd_ != -1) {
-    wait_fds_.push_back(YieldedCoroutine(this, interrupt_fd_, EPOLLIN));
-  }
-  AddAbortFd();
-  int timer_fd = AddTimeout(timeout_ns);
-  yielded_address_ = __builtin_return_address(0);
-  last_tick_ = scheduler_.TickCount();
-  SetState(State::kCoWaiting);
-  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
-
-  // Get here when resumed.
-  return EndOfWait(timer_fd);
-}
-int Coroutine::PollAndWait(const std::vector<WaitFd> &fds,
-                           uint64_t timeout_ns) const {
-  std::vector<struct pollfd> pfds;
-  pfds.reserve(fds.size());
-  for (auto &fd : fds) {
-    pfds.push_back(
-        {.fd = fd.fd, .events = PollEventsFromMask(fd.events), .revents = 0});
-  }
-  if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
-    pfds.push_back(ifd);
-  }
-  int n = Poll(pfds);
-  if (n != -1) {
-    return n;
-  }
-  return Wait(fds, timeout_ns);
-}
-
-#else
-int Coroutine::Wait(struct pollfd &fd, uint64_t timeout_ns) const {
-  wait_fds_.push_back(fd);
-  if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
-    wait_fds_.push_back(ifd);
-  }
-  AddAbortFd();
-  int timer_fd = AddTimeout(timeout_ns);
-  yielded_address_ = __builtin_return_address(0);
-  last_tick_ = scheduler_.TickCount();
-  SetState(State::kCoWaiting);
-  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
-
-  // Get here when resumed.
-  return EndOfWait(timer_fd);
-}
-
-int Coroutine::Wait(const std::vector<struct pollfd> &fds,
-                    uint64_t timeout_ns) const {
-  for (auto &fd : fds) {
-    wait_fds_.push_back(fd);
-  }
-  if (interrupt_fd_ != -1) {
-    struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN};
-    wait_fds_.push_back(ifd);
-  }
-  AddAbortFd();
-  int timer_fd = AddTimeout(timeout_ns);
-  yielded_address_ = __builtin_return_address(0);
-  last_tick_ = scheduler_.TickCount();
-  SetState(State::kCoWaiting);
-  SWAPCONTEXT(resume_, scheduler_.YieldCtx());
-
-  // Get here when resumed.
-  return EndOfWait(timer_fd);
-}
-
-int Coroutine::PollAndWait(struct pollfd &fd, uint64_t timeout_ns) const {
-  int n = Poll({fd});
-  if (n != -1) {
-    return fd.fd;
-  }
-  return Wait(fd, timeout_ns);
-}
-
-int Coroutine::PollAndWait(const std::vector<struct pollfd> &fds,
-                           uint64_t timeout_ns) const {
-
-  int n = Poll(fds);
-  if (n != -1) {
-    return n;
-  }
-  return Wait(fds, timeout_ns);
-}
-#endif
-
-void Coroutine::Nanosleep(uint64_t ns) const {
+void ScheduledCoroutine::Nanosleep(uint64_t ns) const {
   int timer = MakeTimer(this, ns);
   Wait(timer);
 #if CO_TIMER_MODE == CO_TIMER_POSIX
@@ -903,7 +734,7 @@ void Coroutine::Nanosleep(uint64_t ns) const {
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
 
-void Coroutine::CleanupPosixTimer() const {
+void ScheduledCoroutine::CleanupPosixTimer() const {
   // This needs to be idempotent as it is called in the destructor and might have already
   // been called after a Wait has finished.
   if (posix_timer_active_) {
@@ -932,13 +763,13 @@ void Coroutine::CleanupPosixTimer() const {
 
 #endif
 
-void Coroutine::TriggerEvent() const { event_fd_.Trigger(); }
+void ScheduledCoroutine::TriggerEvent() const { event_fd_.Trigger(); }
 
-void Coroutine::ClearEvent() const { event_fd_.Clear(); }
+void ScheduledCoroutine::ClearEvent() const { event_fd_.Clear(); }
 
 #if CO_POLL_MODE == CO_POLL_POLL
-void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
-                           std::vector<Coroutine *> &covec) {
+void ScheduledCoroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
+                           std::vector<ScheduledCoroutine *> &covec) {
   switch (state_) {
   case State::kCoReady:
     [[fallthrough]];
@@ -963,14 +794,14 @@ void Coroutine::AddPollFds(std::vector<struct pollfd> &pollfds,
 }
 #endif
 
-std::string Coroutine::ToString() const {
+std::string ScheduledCoroutine::ToString() const {
   if (IsAlive() && to_string_callback_ != nullptr) {
     return to_string_callback_();
   }
   return MakeDefaultString();
 }
 
-std::string Coroutine::MakeDefaultString() const {
+std::string ScheduledCoroutine::MakeDefaultString() const {
   const char *state = StateName(state_);
   char buffer[256];
   snprintf(buffer, sizeof(buffer), "Coroutine %d: %s: state: %s: address: %p",
@@ -978,13 +809,16 @@ std::string Coroutine::MakeDefaultString() const {
   return buffer;
 }
 
-void Coroutine::Show() const {
+void ScheduledCoroutine::Show() const {
   fprintf(stderr, "%s\n", MakeDefaultString().c_str());
 }
 
-bool Coroutine::IsAlive() const { return scheduler_.IdExists(id_); }
+bool ScheduledCoroutine::IsAlive() const { return scheduler_.IdExists(id_); }
 
-void Coroutine::CallNonTemplate(Coroutine &callee) const {
+void ScheduledCoroutine::CallNonTemplate(ScheduledCoroutine &callee) const {
+  // Tell the callee that it's being called.
+  callee.caller_ = this;
+
   // Start the callee running if it's not already running.  If it's running
   // we trigger its event to wake it up.
   if (callee.state_ == State::kCoNew) {
@@ -1001,7 +835,7 @@ void Coroutine::CallNonTemplate(Coroutine &callee) const {
   callee.caller_ = nullptr;
 }
 
-void Coroutine::Yield() const {
+void ScheduledCoroutine::Yield() const {
   yielded_address_ = __builtin_return_address(0);
   last_tick_ = scheduler_.TickCount();
   SetState(State::kCoYielded);
@@ -1017,11 +851,11 @@ void Coroutine::Yield() const {
   }
 }
 
-void Coroutine::YieldToScheduler() const {
+void ScheduledCoroutine::YieldToScheduler() const {
   SWAPCONTEXT(resume_, scheduler_.YieldCtx());
 }
 
-void Coroutine::YieldNonTemplate() const {
+void ScheduledCoroutine::YieldNonTemplate() const {
   if (caller_ != nullptr) {
     // Tell caller that there's a value available.
     caller_->TriggerEvent();
@@ -1039,7 +873,7 @@ void Coroutine::YieldNonTemplate() const {
   }
 }
 
-void Coroutine::InvokeFunction() {
+void ScheduledCoroutine::InvokeFunction() {
   try {
     function_(*this);
   } catch (const AbortException &) {
@@ -1066,12 +900,12 @@ void Coroutine::InvokeFunction() {
 // the Resume function.  A new compiler might change the
 // name mangling rules and that would break the build.
 extern "C" {
-void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
+void __co_Invoke(ScheduledCoroutine *c) { c->InvokeFunction(); }
 }
 
 CO_DISABLE_ADDRESS_SANITIZER
 CO_DISABLE_THREAD_SANITIZER
-void Coroutine::Resume(int value) const {
+void ScheduledCoroutine::Resume(int value) const {
   if (aborted_) {
     // Cannot resume an aborted coroutine.
     SetState(State::kCoDead);
@@ -1192,12 +1026,12 @@ void Coroutine::Resume(int value) const {
   }
 }
 
-void Coroutine::Abort() const {
+void ScheduledCoroutine::Abort() const {
   abort_pending_ = true;
   abort_fd_.Trigger();
 }
 
-void Coroutine::GetAllFds(std::vector<int> &fds) const {
+void ScheduledCoroutine::GetAllFds(std::vector<int> &fds) const {
   if (event_fd_.poll_fd != -1) {
     fds.push_back(event_fd_.poll_fd);
   }
@@ -1574,7 +1408,7 @@ void CoroutineScheduler::Run() {
 
 co::Coroutine *CoroutineScheduler::Spawn(std::function<void(co::Coroutine *)> f,
                                          CoroutineOptions opts) {
-  auto co = std::make_unique<co::Coroutine>(*this, f, opts);
+  auto co = std::make_unique<co::ScheduledCoroutine>(*this, f, opts);
   auto cp = co.get();
   owned_coroutines_.insert(std::move(co));
   return cp;
@@ -1582,7 +1416,7 @@ co::Coroutine *CoroutineScheduler::Spawn(std::function<void(co::Coroutine *)> f,
 
 co::Coroutine *CoroutineScheduler::Spawn(std::function<void()> f,
                                          CoroutineOptions opts) {
-  auto co = std::make_unique<co::Coroutine>(*this, f, opts);
+  auto co = std::make_unique<co::ScheduledCoroutine>(*this, f, opts);
   auto cp = co.get();
   owned_coroutines_.insert(std::move(co));
   return cp;
@@ -1594,14 +1428,14 @@ void CoroutineScheduler::GetPollState(PollState *poll_state) {
 }
 #endif
 
-void CoroutineScheduler::AddCoroutine(Coroutine *c) {
+void CoroutineScheduler::AddCoroutine(ScheduledCoroutine *c) {
   coroutines_.push_back(c);
 }
 
 // Removes a coroutine but doesn't destruct it.  The coroutines's id will
 // be removed and can be reused immediately after the completion callback
 // is called.
-void CoroutineScheduler::RemoveCoroutine(const Coroutine *c) {
+void CoroutineScheduler::RemoveCoroutine(const ScheduledCoroutine *c) {
   deletions_.insert(c);
 }
 
@@ -1615,7 +1449,7 @@ void CoroutineScheduler::CommitDeletions() {
         coroutines_.erase(it);
         // Call completion callback to allow for external memory management.
         if (completion_callback_ != nullptr) {
-          completion_callback_(const_cast<Coroutine *>(c));
+          completion_callback_(const_cast<ScheduledCoroutine *>(c));
         }
         if (owned_coroutines_.contains(c)) {
           owned_coroutines_.erase(c);
@@ -1685,73 +1519,5 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
 // Non-invasive coroutine functions.
 thread_local const co::Coroutine *self;
 thread_local co::CoroutineScheduler *scheduler;
-
-void Yield() { self->Yield(); }
-
-int Poll(const std::vector<int> &fds, short event_mask) {
-  return self->Poll(fds, event_mask);
-}
-int Poll(const std::vector<struct pollfd> &fds) { return self->Poll(fds); }
-
-int Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
-  return self->Wait(fd, event_mask, timeout_ns);
-}
-
-// Wait for a set of fds, all with the same event mask.
-int Wait(const std::vector<int> &fd, uint32_t event_mask, uint64_t timeout_ns) {
-  return self->Wait(fd, event_mask, timeout_ns);
-}
-
-// Poll first and if the fd is not ready, wait for it.
-int PollAndWait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
-  return self->PollAndWait(fd, event_mask, timeout_ns);
-}
-
-// Wait for a set of fds, all with the same event mask.
-int PollAndWait(const std::vector<int> &fd, uint32_t event_mask,
-                uint64_t timeout_ns) {
-  return self->PollAndWait(fd, event_mask, timeout_ns);
-}
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
-  return self->Wait(fds, timeout_ns);
-}
-int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns) {
-  return self->Wait(fds, timeout_ns);
-}
-#else
-// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-int Wait(struct pollfd &fd, uint64_t timeout_ns) {
-  return self->Wait(fd, timeout_ns);
-}
-
-// Wait for a set of pollfds.  Each needs to specify an fd and an event.
-// Returns the fd that was triggered, or -1 for a timeout.
-int Wait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns) {
-  return self->Wait(fds, timeout_ns);
-}
-// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-int PollAndWait(struct pollfd &fd, uint64_t timeout_ns) {
-  return self->PollAndWait(fd, timeout_ns);
-}
-
-// Wait for a set of pollfds.  Each needs to specify an fd and an event.
-// Returns the fd that was triggered, or -1 for a timeout.
-int PollAndWait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns) {
-  return self->PollAndWait(fds, timeout_ns);
-}
-#endif
-
-void Exit() { return self->Exit(); }
-
-// Sleeping functions.
-void Nanosleep(uint64_t ns) { return self->Nanosleep(ns); }
-void Millisleep(time_t msecs) {
-  Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
-}
-void Sleep(time_t secs) {
-  Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
-}
 
 } // namespace co
