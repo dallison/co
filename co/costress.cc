@@ -16,10 +16,10 @@ void Test(Coroutine *c) {
 }
 
 int main() {
-  CoroutineScheduler scheduler;
+  CoroutineScheduler sched;
   std::vector<std::unique_ptr<ScheduledCoroutine>> coroutines;
   for (int i = 0; i < 1000; i++) {
-    coroutines.push_back(std::make_unique<ScheduledCoroutine>(scheduler, Test));
+    coroutines.push_back(std::make_unique<ScheduledCoroutine>(sched, Test));
   }
-  scheduler.Run();
+  sched.Run();
 }

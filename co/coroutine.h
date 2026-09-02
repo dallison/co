@@ -49,6 +49,25 @@
 
 namespace co {
 
+namespace detail {
+
+template <class Rep, class Period>
+inline uint64_t ChronoToNanoseconds(std::chrono::duration<Rep, Period> duration) {
+  using FloatingNanoseconds = std::chrono::duration<long double, std::nano>;
+  const long double count = FloatingNanoseconds(duration).count();
+  if (!(count > 0)) {
+    return 0;
+  }
+  const long double maximum =
+      static_cast<long double>(std::numeric_limits<uint64_t>::max());
+  if (count >= maximum) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return static_cast<uint64_t>(count);
+}
+
+} // namespace detail
+
 class CoroutineScheduler;
 class Coroutine;
 class ScheduledCoroutine;

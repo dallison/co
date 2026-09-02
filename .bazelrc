@@ -1,6 +1,9 @@
 # For all builds, use C++17
 build --cxxopt="-std=c++17"
 
+# Strict diagnostics for this repository's C++ sources.
+build:strict --per_file_copt=(co|http_client|http_server)/.*@-Wall,-Wextra,-Wpedantic,-Wconversion,-Wsign-conversion,-Wshadow,-Wnon-virtual-dtor,-Wold-style-cast,-Wcast-align,-Woverloaded-virtual,-Wnull-dereference,-Wdouble-promotion,-Wformat=2,-Wimplicit-fallthrough,-Wundef,-Wextra-semi,-Wcast-qual,-Wmissing-declarations,-Wheader-hygiene,-Wthread-safety,-Wcomma,-Wrange-loop-analysis,-Wdeprecated,-Werror,-Wno-nullability-extension,-Wno-gcc-compat,-Wno-unknown-warning-option
+
 # For Apple Silicon
 build:apple_silicon --cpu=darwin_arm64
 build:apple_silicon --features=oso_prefix_is_pwd

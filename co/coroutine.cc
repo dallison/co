@@ -13,6 +13,7 @@
 #include <cassert>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 
 #include "bitset.h"
 
@@ -105,6 +106,33 @@ constexpr bool kCoDebug = false;
 #endif
 
 namespace co {
+
+namespace {
+
+short PollEventsFromMask(uint32_t event_mask) {
+  if (event_mask > static_cast<uint32_t>(std::numeric_limits<short>::max())) {
+    abort();
+  }
+  return static_cast<short>(event_mask);
+}
+
+bool PollNfdsFromSize(size_t count, nfds_t *nfds) {
+  if (count > static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
+    return false;
+  }
+  *nfds = static_cast<nfds_t>(count);
+  return true;
+}
+
+bool FdToBitIndex(int fd, std::uint32_t *bit_index) {
+  if (fd < 0) {
+    return false;
+  }
+  *bit_index = static_cast<std::uint32_t>(fd);
+  return true;
+}
+
+} // namespace
 
 struct AbortException {};
 
@@ -644,7 +672,11 @@ int ScheduledCoroutine::PollWithMutableFds(std::vector<struct pollfd> &fds) cons
     struct pollfd ifd = {.fd = interrupt_fd_, .events = POLLIN, .revents = 0};
     fds.push_back(ifd);
   }
-  int ret = ::poll(fds.data(), fds.size(), 0);
+  nfds_t nfds = 0;
+  if (!PollNfdsFromSize(fds.size(), &nfds)) {
+    return -1;
+  }
+  int ret = ::poll(fds.data(), nfds, 0);
   if (ret <= 0) {
     return -1;
   }
@@ -661,7 +693,7 @@ void ScheduledCoroutine::AddToUserWaitFds(int fd, uint32_t event_mask) const {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   wait_fds_.push_back(YieldedCoroutine(this, fd, event_mask));
 #else
-  wait_fds_.push_back({.fd = fd, .events = short(event_mask)});
+  wait_fds_.push_back({.fd = fd, .events = PollEventsFromMask(event_mask)});
 #endif
 }
 
@@ -1194,7 +1226,9 @@ void CoroutineScheduler::Run() {
     // converting the epoll_event to a YieldedCoroutine.
 
     events.clear();
-    events.reserve(num_ready);
+    if (num_ready > 0) {
+      events.reserve(static_cast<size_t>(num_ready));
+    }
     for (int i = 0; i < num_ready; i++) {
       struct epoll_event &event = epoll_events[i];
       if (event.data.fd > max_fd) {
@@ -1232,8 +1266,11 @@ void CoroutineScheduler::Run() {
 #else
     // Poll mode.
     BuildPollFds(&poll_state_);
-    int num_ready =
-        ::poll(poll_state_.pollfds.data(), poll_state_.pollfds.size(), -1);
+    nfds_t nfds = 0;
+    if (!PollNfdsFromSize(poll_state_.pollfds.size(), &nfds)) {
+      return;
+    }
+    int num_ready = ::poll(poll_state_.pollfds.data(), nfds, -1);
     if (num_ready <= 0) {
       continue;
     }
@@ -1242,7 +1279,9 @@ void CoroutineScheduler::Run() {
     }
     // Copy all triggered pollfds into the events vector.
     events.clear();
-    events.reserve(num_ready);
+    if (num_ready > 0) {
+      events.reserve(static_cast<size_t>(num_ready));
+    }
     constexpr size_t kNumReservedFds = 2;
     for (size_t i = 0; i < poll_state_.pollfds.size(); i++) {
       if (poll_state_.pollfds[i].fd > max_fd) {
@@ -1305,7 +1344,7 @@ void CoroutineScheduler::Run() {
       if (index >= num_ready) {
         break;
       }
-      YieldedCoroutine *c = &events[index];
+      YieldedCoroutine *c = &events[static_cast<size_t>(index)];
       index++;
       if (c->fd == interrupt_fd_.poll_fd) {
         interrupt_fd_.Clear();
@@ -1322,7 +1361,8 @@ void CoroutineScheduler::Run() {
       }
       tick_count_++;
 
-      if (processed_fds.Contains(c->fd)) {
+      std::uint32_t fd_bit = 0;
+      if (FdToBitIndex(c->fd, &fd_bit) && processed_fds.Contains(fd_bit)) {
         // Since we can have more than one coroutine waiting for an fd we need
         // to check that the fd is still ready to prevent blocking.  We only do
         // this if the fd is in blocking mode.
@@ -1341,7 +1381,9 @@ void CoroutineScheduler::Run() {
           }
         }
       }
-      processed_fds.Set(c->fd);
+      if (FdToBitIndex(c->fd, &fd_bit)) {
+        processed_fds.Set(fd_bit);
+      }
 
       // Clear the event for the corouutine since we will be resuming
       // it.

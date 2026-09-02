@@ -4,6 +4,7 @@
 
 #include "co/coroutine_scheduler.h"
 #include <csignal>
+#include <cstdint>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -32,7 +33,7 @@ void Signal(int sig) {
 // Send a buffer full of data to the coroutines file descriptor.
 static void SendToClient(co::Coroutine *c, int fd, const char *response,
                          size_t length) {
-  int offset = 0;
+  size_t offset = 0;
   const size_t kMaxLength = 1024;
   while (length > 0) {
     // Wait until we can send to the network.  This will yield to other
@@ -50,8 +51,8 @@ static void SendToClient(co::Coroutine *c, int fd, const char *response,
     if (n == 0) {
       return;
     }
-    length -= n;
-    offset += n;
+    length -= static_cast<size_t>(n);
+    offset += static_cast<size_t>(n);
   }
 }
 
@@ -97,7 +98,8 @@ static void ReadHeaders(std::string &buffer, std::vector<std::string> &header,
     char *name = &buffer[i];
     while (i < buffer.size() && buffer[i] != ':') {
       // Convert name to upper case as they are case insensitive.
-      buffer[i] = toupper(buffer[i]);
+      buffer[i] = static_cast<char>(
+          ::toupper(static_cast<unsigned char>(buffer[i])));
       i++;
     }
     // No header value, end of headers.
@@ -112,7 +114,7 @@ static void ReadHeaders(std::string &buffer, std::vector<std::string> &header,
     }
     char *value = &buffer[i];
     while (i < buffer.size()) {
-      if (i < buffer.size() + 3 && buffer[i] == '\r') {
+      if (i + 2 < buffer.size() && buffer[i] == '\r') {
         // Check for continuation with a space as the first character on the
         // next line.  TAB too.
         if (buffer[i + 2] != ' ' && buffer[i + 2] != '\t') {
@@ -130,8 +132,8 @@ static void ReadHeaders(std::string &buffer, std::vector<std::string> &header,
   }
 }
 
-void Server(co::Coroutine *c, int fd, struct sockaddr_in sender,
-            socklen_t sender_len) {
+void Server(co::Coroutine *c, int fd, [[maybe_unused]] struct sockaddr_in sender,
+            [[maybe_unused]] socklen_t sender_len) {
   std::string buffer;
 
   // Read incoming HTTP request and parse it.
@@ -155,7 +157,7 @@ void Server(co::Coroutine *c, int fd, struct sockaddr_in sender,
       return;
     }
     // Append to data buffer.
-    buffer += std::string(buf, n);
+    buffer += std::string(buf, static_cast<size_t>(n));
 
     // A blank line terminates the read
     if (buffer.find("\r\n\r\n") != std::string::npos) {
@@ -198,34 +200,40 @@ void Server(co::Coroutine *c, int fd, struct sockaddr_in sender,
     if (e == -1) {
       int n = snprintf(response, sizeof(response), "%s 404 Not Found\r\n\r\n",
                        protocol.c_str());
-      SendToClient(c, fd, response, n);
+      if (n > 0 && static_cast<size_t>(n) < sizeof(response)) {
+        SendToClient(c, fd, response, static_cast<size_t>(n));
+      }
     } else {
       int file_fd = open(filename.c_str(), O_RDONLY);
       if (file_fd == -1) {
         int n = snprintf(response, sizeof(response), "%s 404 Not Found\r\n\r\n",
                          protocol.c_str());
-        SendToClient(c, fd, response, n);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(response)) {
+          SendToClient(c, fd, response, static_cast<size_t>(n));
+        }
       } else {
         // Send the file back.
-        int n =
-            snprintf(response, sizeof(response),
-                     "%s 200 OK\r\nContent-type: text/html\r\nContent-length: "
-                     "%zd\r\n\r\n",
-                     protocol.c_str(), static_cast<size_t>(st.st_size));
-        SendToClient(c, fd, response, n);
+        int n = snprintf(
+            response, sizeof(response),
+            "%s 200 OK\r\nContent-type: text/html\r\nContent-length: "
+            "%jd\r\n\r\n",
+            protocol.c_str(), static_cast<intmax_t>(st.st_size));
+        if (n > 0 && static_cast<size_t>(n) < sizeof(response)) {
+          SendToClient(c, fd, response, static_cast<size_t>(n));
+        }
 
         for (;;) {
           char buf[1024];
           c->Wait(file_fd, POLLIN);
-          ssize_t n = read(file_fd, buf, sizeof(buf));
-          if (n == -1) {
+          ssize_t bytes_read = read(file_fd, buf, sizeof(buf));
+          if (bytes_read == -1) {
             perror("file read");
             break;
           }
-          if (n == 0) {
+          if (bytes_read == 0) {
             break;
           }
-          SendToClient(c, fd, buf, n);
+          SendToClient(c, fd, buf, static_cast<size_t>(bytes_read));
         }
         close(file_fd);
       }
@@ -234,7 +242,9 @@ void Server(co::Coroutine *c, int fd, struct sockaddr_in sender,
     // Invalid request method.
     int n = snprintf(response, sizeof(response),
                      "%s 400 Invalid request method\r\n\r\n", protocol.c_str());
-    SendToClient(c, fd, response, n);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(response)) {
+      SendToClient(c, fd, response, static_cast<size_t>(n));
+    }
   }
 
   close(fd);
@@ -254,7 +264,7 @@ void Listener(co::Coroutine *c) {
                              .sin_len = sizeof(int),
 #endif
                              .sin_addr = {.s_addr = INADDR_ANY}};
-  int e = bind(s, (struct sockaddr *)&addr, sizeof(addr));
+  int e = bind(s, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
   if (e == -1) {
     perror("bind");
     close(s);
@@ -283,7 +293,7 @@ void Listener(co::Coroutine *c) {
 
     struct sockaddr_in sender;
     socklen_t sender_len = sizeof(sender);
-    int fd = accept(s, (struct sockaddr *)&sender, &sender_len);
+    int fd = accept(s, reinterpret_cast<sockaddr *>(&sender), &sender_len);
     if (fd == -1) {
       perror("accept");
       continue;
@@ -297,7 +307,7 @@ void Listener(co::Coroutine *c) {
   }
 }
 
-int main(int argc, const char *argv[]) {
+int main(int /*argc*/, const char * /*argv*/[]) {
   co::CoroutineScheduler scheduler;
 
   g_scheduler = &scheduler; // For signal handler.

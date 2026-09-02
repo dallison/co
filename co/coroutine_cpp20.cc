@@ -21,6 +21,7 @@
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits>
 #include <time.h>
 #include <unistd.h>
 
@@ -111,18 +112,24 @@ void Scheduler::ScheduleCoroutine(Coroutine* coroutine) {
 }
 
 int Scheduler::PollFd(int fd, uint32_t event_mask) {
+  if (event_mask >
+      static_cast<uint32_t>(std::numeric_limits<short>::max())) {
+    return -1;
+  }
   struct pollfd pfd;
   pfd.fd = fd;
-  pfd.events = event_mask;
+  pfd.events = static_cast<short>(event_mask);
   pfd.revents = 0;
 
   int ret = poll(&pfd, 1, 0);
   if (ret <= 0) return -1;
 
+  const uint32_t revents =
+      static_cast<uint32_t>(static_cast<unsigned short>(pfd.revents));
   if (event_mask & POLLIN) {
-    if (pfd.revents & (POLLIN | POLLERR)) return fd;
+    if (revents & (POLLIN | POLLERR)) return fd;
   } else {
-    if ((pfd.revents & event_mask) || (pfd.revents & POLLERR)) return fd;
+    if ((revents & event_mask) || (revents & POLLERR)) return fd;
   }
   return -1;
 }
@@ -678,10 +685,15 @@ void Scheduler::ProcessEvents() {
   interrupt_pfd.revents = 0;
   pfds.push_back(interrupt_pfd);
 
-  int ret = poll(pfds.data(), pfds.size(), 0);
+  if (pfds.size() >
+      static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
+    return;
+  }
+  const nfds_t nfds = static_cast<nfds_t>(pfds.size());
+  int ret = poll(pfds.data(), nfds, 0);
   if (ret <= 0) {
     if (waiting_fds_.empty()) return;
-    ret = poll(pfds.data(), pfds.size(), -1);
+    ret = poll(pfds.data(), nfds, -1);
     if (ret <= 0) return;
   }
 
