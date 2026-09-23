@@ -419,3 +419,26 @@ TEST(CoroutinesTest, AbortNestedShutdown) {
   close(pipes[0]);
   close(pipes[1]);
 }
+
+TEST(CoroutinesTest, StopBeforeRunIsNotLost) {
+  co::CoroutineScheduler scheduler;
+
+  bool ran = false;
+  scheduler.Spawn([&ran]() { ran = true; });
+  scheduler.Stop();
+  scheduler.Run();
+
+  EXPECT_FALSE(ran);
+}
+
+// A consumed stop applies to one run only; the next run must execute normally.
+TEST(CoroutinesTest, StopDoesNotLeakIntoALaterRun) {
+  co::CoroutineScheduler scheduler;
+  scheduler.Stop();
+  scheduler.Run();
+
+  bool ran = false;
+  scheduler.Spawn([&ran]() { ran = true; });
+  scheduler.Run();
+  EXPECT_TRUE(ran);
+}
