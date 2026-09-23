@@ -168,7 +168,8 @@ EventFd EventFd::Create() {
   e.poll_fd = fd;
   e.trigger_fd = fd;
 #elif CO_EVENT_MODE == CO_EVENT_EVENTFD
-  int fd = eventfd(0, EFD_NONBLOCK);
+  // Children exec'd by the application do not use this fd.
+  int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (fd == -1) {
     return e;
   }
@@ -530,7 +531,7 @@ int MakeTimer([[maybe_unused]] const Coroutine *coroutine, uint64_t ns) {
   new_value.it_value.tv_nsec = then_nsec % kBillion;
   new_value.it_interval.tv_sec = 0;
   new_value.it_interval.tv_nsec = 0;
-  int fd = timerfd_create(CLOCK_REALTIME, 0);
+  int fd = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC);
   timerfd_settime(fd, TFD_TIMER_ABSTIME, &new_value, NULL);
   return fd;
 #elif CO_TIMER_MODE == CO_TIMER_POSIX
@@ -1212,7 +1213,7 @@ CoroutineScheduler::CoroutineScheduler() {
   interrupt_fd_ = EventFd::Create();
   co_interrupt_fd_ = EventFd::Create();
 #if CO_POLL_MODE == CO_POLL_EPOLL
-  epoll_fd_ = epoll_create1(0);
+  epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
   if (epoll_fd_ == -1) {
     std::cerr << "Failed to create epoll fd: " << strerror(errno) << std::endl;
     abort();
@@ -1345,6 +1346,19 @@ void CoroutineScheduler::BuildPollFds(PollState *poll_state) {
 
 void CoroutineScheduler::Run() {
   running_ = true;
+  // The running flag is set on entry, which would discard a Stop() that
+  // already arrived. Keep that stop pending until this run observes it.
+  if (stop_requested_.exchange(false)) {
+    running_ = false;
+    return;
+  }
+  // A stop during this run must not suppress the next one. This also covers
+  // the early return below.
+  struct ClearStopRequest {
+    std::atomic<bool> &flag;
+    ~ClearStopRequest() { flag.store(false); }
+  } clear_stop_request{stop_requested_};
+
   co::scheduler = this; // Thread local.
 #if defined(CO_THREAD_SANITIZER)
   // Capture the TSan fiber for the thread that runs the scheduler loop.  It
@@ -1644,6 +1658,7 @@ void CoroutineScheduler::TriggerInterrupt() const {
 }
 
 void CoroutineScheduler::Stop() {
+  stop_requested_.store(true);
   if (abort_on_stop_) {
     // Abort all coroutines.
     for (auto *c : coroutines_) {

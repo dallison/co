@@ -816,6 +816,9 @@ protected:
   uint32_t last_freed_coroutine_id_ = -1U;
   Context yield_;
   std::atomic<bool> running_ = false;
+  // Set by Stop() and consumed by the next Run(), so a stop that arrives
+  // before Run() is not lost.
+  std::atomic<bool> stop_requested_ = false;
 #if CO_POLL_MODE == CO_POLL_EPOLL
   absl::flat_hash_map<int, absl::flat_hash_set<YieldedCoroutine *>>
       waiting_coroutines_;
