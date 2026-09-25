@@ -20,6 +20,16 @@
 
 #define ASSERT_OK(e) ASSERT_THAT(e, ::absl_testing::IsOk())
 
+class BorrowedInterruptFdCoroutine : public co::Coroutine {
+public:
+  BorrowedInterruptFdCoroutine(co::CoroutineScheduler &scheduler,
+                               int interrupt_fd)
+      : Coroutine(scheduler, [](co::Coroutine *) {}, "", -1) {
+    interrupt_fd_ = interrupt_fd;
+    interrupt_fd_owned_ = false;
+  }
+};
+
 TEST(CoroutineTest, Basic) {
   co::CoroutineScheduler scheduler;
   co::Coroutine c1(scheduler, [](co::Coroutine *c) {
@@ -74,6 +84,25 @@ TEST(CoroutineTest, InterruptFdsAreClosedOnDestruction) {
     }
 
     // The coroutine owns only its duplicate, not the caller's descriptor.
+    EXPECT_NE(-1, fcntl(interrupt_pipe[0], F_GETFD));
+  }
+
+  EXPECT_EQ(0, close(interrupt_pipe[0]));
+  EXPECT_EQ(0, close(interrupt_pipe[1]));
+}
+
+TEST(CoroutineTest, BorrowedInterruptFdIsNotClosedOnDestruction) {
+  int interrupt_pipe[2];
+  ASSERT_EQ(0, pipe(interrupt_pipe));
+
+  {
+    co::CoroutineScheduler scheduler;
+    {
+      BorrowedInterruptFdCoroutine coroutine(scheduler, interrupt_pipe[0]);
+      EXPECT_EQ(interrupt_pipe[0], coroutine.GetInterruptFd());
+      scheduler.Run();
+    }
+
     EXPECT_NE(-1, fcntl(interrupt_pipe[0], F_GETFD));
   }
 

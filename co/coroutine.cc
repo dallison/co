@@ -334,7 +334,8 @@ Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
                      int interrupt_fd, bool autostart, size_t stack_size,
                      void *user_data)
     : scheduler_(coroutine_scheduler), function_(std::move(functor)),
-      interrupt_fd_(dup(interrupt_fd)), user_data_(user_data) {
+      interrupt_fd_(dup(interrupt_fd)), interrupt_fd_owned_(true),
+      user_data_(user_data) {
   id_ = scheduler_.AllocateId();
   if (name.empty()) {
     char buf[256];
@@ -402,7 +403,7 @@ Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
 Coroutine::~Coroutine() {
   event_fd_.Close();
   abort_fd_.Close();
-  if (interrupt_fd_ >= 0) {
+  if (interrupt_fd_owned_ && interrupt_fd_ >= 0) {
     ::close(interrupt_fd_);
     interrupt_fd_ = -1;
   }
