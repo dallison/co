@@ -2,6 +2,9 @@
 #include "co/coroutine.h"
 #include <gtest/gtest.h>
 
+#include <cerrno>
+#include <fcntl.h>
+
 #define VAR(a) a##__COUNTER__
 #define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
 
@@ -41,6 +44,41 @@ TEST(CoroutineTest, Loop) {
         }));
   }
   scheduler.Run();
+}
+
+TEST(CoroutineTest, InterruptFdsAreClosedOnDestruction) {
+  int interrupt_pipe[2];
+  ASSERT_EQ(0, pipe(interrupt_pipe));
+
+  std::vector<int> duplicated_fds;
+  {
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions options;
+    options.interrupt_fd = interrupt_pipe[0];
+
+    for (int i = 0; i < 32; ++i) {
+      co::Coroutine *coroutine = scheduler.Spawn([]() {}, options);
+      int duplicated_fd = coroutine->GetInterruptFd();
+      ASSERT_GE(duplicated_fd, 0);
+      EXPECT_NE(interrupt_pipe[0], duplicated_fd);
+      EXPECT_NE(-1, fcntl(duplicated_fd, F_GETFD));
+      duplicated_fds.push_back(duplicated_fd);
+    }
+
+    scheduler.Run();
+
+    for (int duplicated_fd : duplicated_fds) {
+      errno = 0;
+      EXPECT_EQ(-1, fcntl(duplicated_fd, F_GETFD));
+      EXPECT_EQ(EBADF, errno);
+    }
+
+    // The coroutine owns only its duplicate, not the caller's descriptor.
+    EXPECT_NE(-1, fcntl(interrupt_pipe[0], F_GETFD));
+  }
+
+  EXPECT_EQ(0, close(interrupt_pipe[0]));
+  EXPECT_EQ(0, close(interrupt_pipe[1]));
 }
 
 TEST(CoroutineTest, Sleep) {

@@ -402,6 +402,10 @@ Coroutine::Coroutine(CoroutineScheduler &coroutine_scheduler,
 Coroutine::~Coroutine() {
   event_fd_.Close();
   abort_fd_.Close();
+  if (interrupt_fd_ >= 0) {
+    ::close(interrupt_fd_);
+    interrupt_fd_ = -1;
+  }
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   CleanupPosixTimer();
 #endif
