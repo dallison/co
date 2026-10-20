@@ -27,7 +27,7 @@ include(FetchContent)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20230802.0 # Matches the version in co's WORKSPACE
+    GIT_TAG 20230802.0 # Matches the version in co's MODULE.bazel
     # Pass architecture settings to Abseil's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -40,7 +40,7 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG release-1.11.0 # Matches the version in your WORKSPACE
+    GIT_TAG release-1.11.0 # Matches the version in your MODULE.bazel
     # Pass architecture settings to Googletest's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -48,17 +48,24 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 # Googletest provides targets like gtest_main, gtest, gmock.
 
-# --- co Library Target ---
-# Corresponds to //:co in Bazel
-add_library(co_api STATIC
-    co/coroutine.h
+# --- External Dependency: C++ Toolbelt ---
+# The 'co' project depends on cpp_toolbelt, so we need to fetch and make it available.
+FetchContent_Declare(
+    cpp_toolbelt
+    GIT_REPOSITORY https://github.com/mikael-s-persson/cpp_toolbelt.git
+    GIT_TAG a47bf603c959d5fbbcc23c10d63f0402a6e95edb # Matches the version in co's MODULE.bazel
+    # Pass architecture settings to Toolbelt's CMake build
+    CMAKE_ARGS
+        CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
 )
+FetchContent_MakeAvailable(cpp_toolbelt)
+# Abseil provides targets like absl::base, absl::strings, etc.
 
 # --- co Library Target ---
 # Corresponds to //:co in Bazel
 add_library(co STATIC
     co/coroutine.cc
-    co/coroutine_scheduler.h
+    co/coroutine.h
     co/bitset.h
     co/context.S
     co/context.h
@@ -70,9 +77,9 @@ target_include_directories(co PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# Link against Abseil dependencies
+# Link against dependencies
 target_link_libraries(co PUBLIC
-    co_api
+    toolbelt
     absl::base
     absl::synchronization # Used by mutex, condition, etc.
     absl::time # Used by channel, future (for timeouts)
@@ -92,6 +99,10 @@ target_include_directories(co_cpp20 PUBLIC
 set_target_properties(co_cpp20 PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
+)
+
+target_link_libraries(co_cpp20 PUBLIC
+    absl::flat_hash_map
 )
 
 # --- Tests ---
