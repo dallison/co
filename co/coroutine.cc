@@ -1375,8 +1375,9 @@ void CoroutineScheduler::Run() {
       if (index >= num_ready) {
         break;
       }
-      YieldedCoroutine *c = &events[static_cast<size_t>(index)];
-      index++;
+      const int old_index = index;
+      YieldedCoroutine *c = &events[static_cast<size_t>(old_index)];
+      index = old_index + 1;
       if (c->fd == interrupt_fd_.poll_fd) {
         interrupt_fd_.Clear();
         continue;
