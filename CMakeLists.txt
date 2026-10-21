@@ -1,7 +1,7 @@
 #STATIC CMakeLists.txt for the co project
 # This file defines the 'co' library and its dependencies using CMake.
 
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.21)
 project(co LANGUAGES CXX ASM) # Add ASM language for .S files
 
 # Set C++ standard and compiler flags
@@ -27,7 +27,7 @@ include(FetchContent)
 FetchContent_Declare(
     abseil
     GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-    GIT_TAG 20230802.0 # Matches the version in co's MODULE.bazel
+    GIT_TAG 20250814.1 # Matches the version in co's MODULE.bazel
     # Pass architecture settings to Abseil's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -40,7 +40,7 @@ FetchContent_MakeAvailable(abseil)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG release-1.11.0 # Matches the version in your MODULE.bazel
+    GIT_TAG v1.17.0 # Matches the version in your MODULE.bazel
     # Pass architecture settings to Googletest's CMake build
     CMAKE_ARGS
         CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
@@ -105,6 +105,7 @@ target_link_libraries(co_cpp20 PUBLIC
     absl::flat_hash_map
 )
 
+if(PROJECT_IS_TOP_LEVEL)
 # --- Tests ---
 enable_testing()
 
@@ -117,6 +118,7 @@ target_link_libraries(coroutines_test PRIVATE
     absl::status
     gtest_main
 )
+set_target_properties(coroutines_test PROPERTIES EXCLUDE_FROM_ALL TRUE)
 add_test(NAME coroutines_test COMMAND coroutines_test)
 
 # C++20 coroutine tests
@@ -131,4 +133,6 @@ set_target_properties(test_cpp20 PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
 )
+set_target_properties(test_cpp20 PROPERTIES EXCLUDE_FROM_ALL TRUE)
 add_test(NAME test_cpp20 COMMAND test_cpp20)
+endif()
