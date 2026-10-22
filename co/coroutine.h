@@ -10,7 +10,7 @@
 // 2. user contexts which is a System V facility that is
 //     available on Linux and other operating systems.
 // 3. A custom context switcher written in assembly language for
-//    x86_64 and aarch64.
+//    x86, x86_64, ARM, AArch64, RV32, and RV64.
 //
 //
 // Which one to use?  The custom context switcher is the fastest but may
@@ -25,6 +25,15 @@
 #define CO_CTX_SETJMP 1
 #define CO_CTX_UCONTEXT 2
 #define CO_CTX_CUSTOM 3
+
+#if defined(__i386__) || defined(__x86_64__) || defined(__arm__) ||           \
+    defined(__aarch64__) ||                                                   \
+    (defined(__riscv) && !defined(__riscv_32e) &&                             \
+     ((__riscv_xlen == 32) || (__riscv_xlen == 64)))
+#define CO_CUSTOM_CONTEXT_SUPPORTED 1
+#else
+#define CO_CUSTOM_CONTEXT_SUPPORTED 0
+#endif
 
 // Do we use ::poll or ::epoll?  The epoll system call is Linux only and
 // can improve performance.
@@ -76,13 +85,13 @@
 // use user contexts.
 //
 // Another alternative is to use the custom context switcher that is
-// provided in context.h.  This is the fastest and most portable but
-// is only available for x86_64 and aarch64 (at the moment).
+// provided in context.h.  This is the fastest and most portable but is only
+// available for x86, x86_64, ARM, AArch64, RV32, and RV64 (at the moment).
 //
 // Modify the CO_CTX_MODE macro value to change the context switcher.
 #if defined(__APPLE__)
-#if defined(__x86_64__) || defined(__aarch64__)
-// On Apple, we can use the custom context switcher for x86_64 and aarch64.
+#if CO_CUSTOM_CONTEXT_SUPPORTED
+// Use the custom context switcher on supported Apple architectures.
 #define CO_CTX_MODE CO_CTX_CUSTOM
 #else
 // Is there another Apple architecture?  Maybe, but the custome contxt switcher
@@ -99,7 +108,7 @@
 #elif defined(__linux__)
 
 // On Linux, let's use custom context if it's available for the architecture.
-#if defined(__x86_64__) || defined(__aarch64__)
+#if CO_CUSTOM_CONTEXT_SUPPORTED
 #define CO_CTX_MODE CO_CTX_CUSTOM
 #else
 // Custom context switcher is not available for this architecture.  Use the
@@ -117,7 +126,7 @@
 
 #elif defined(__QNX__) || defined(__QNXNTO__)
 // QNX configuration
-#if defined(__x86_64__) || defined(__aarch64__)
+#if CO_CUSTOM_CONTEXT_SUPPORTED
 // On QNX, use custom context switcher if available for the architecture.
 #define CO_CTX_MODE CO_CTX_CUSTOM
 #else
@@ -132,7 +141,7 @@
 #else
 // Other OS, use the custom context switcher if available
 // or setjmp/longjmp if not.  The custom context switcher is only available
-#if defined(__x86_64__) || defined(__aarch64__)
+#if CO_CUSTOM_CONTEXT_SUPPORTED
 #define CO_CTX_MODE CO_CTX_CUSTOM
 #else
 // Portable version is setjmp/longjmp

@@ -50,11 +50,23 @@ FetchContent_MakeAvailable(googletest)
 
 # --- co Library Target ---
 # Corresponds to //:co in Bazel
+set(CO_CONTEXT_ARCH_SOURCES
+    co/context_aarch64.S
+    co/context_arm.S
+    co/context_i386.S
+    co/context_riscv.S
+    co/context_x86_64.S
+)
+set_source_files_properties(${CO_CONTEXT_ARCH_SOURCES}
+    PROPERTIES HEADER_FILE_ONLY TRUE
+)
+
 add_library(co STATIC
     co/coroutine.cc
     co/coroutine.h
     co/bitset.h
     co/context.S
+    ${CO_CONTEXT_ARCH_SOURCES}
     co/context.h
     co/detect_sanitizers.h
 )
