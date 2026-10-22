@@ -14,6 +14,13 @@ cc_library(
         "coroutine.h",
         "detect_sanitizers.h",
     ],
+    textual_hdrs = [
+        "context_aarch64.S",
+        "context_arm.S",
+        "context_i386.S",
+        "context_riscv.S",
+        "context_x86_64.S",
+    ],
     copts = [
         "-Wall",
     ],

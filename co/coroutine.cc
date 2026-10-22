@@ -300,7 +300,19 @@ void __real_longjmp(jmp_buf, int);
 asm(
   SYM(__real_longjmp) ":\n"
   "b " SYM(longjmp) "\n");
+#elif defined(__arm__)
+asm(
+  SYM(__real_longjmp) ":\n"
+  "b " SYM(longjmp) "\n");
+#elif defined(__riscv)
+asm(
+  SYM(__real_longjmp) ":\n"
+  "tail " SYM(longjmp) "\n");
 #elif defined(__x86_64__)
+asm(
+  SYM(__real_longjmp) ":\n"
+  "jmp " SYM(longjmp) "\n");
+#elif defined(__i386__)
 asm(
   SYM(__real_longjmp) ":\n"
   "jmp " SYM(longjmp) "\n");
