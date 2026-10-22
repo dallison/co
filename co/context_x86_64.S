@@ -31,11 +31,7 @@
   je 2f         // Zero means abort.
   call SYM(CoroutineSetContext)
 2:
-#if defined(__APPLE__)
   call SYM(abort)
-#else
-  call SYM(abort)@PLT
-#endif
 
 // Entry:
 // rdi: context pointer from CoroutineGetContext
