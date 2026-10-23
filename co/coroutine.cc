@@ -303,12 +303,18 @@ asm(
   SYM(__real_longjmp) ":\n"
   "b " SYM(longjmp) "\n");
 #elif defined(__arm__)
-// arm32, using bx in case of standard vs thumb modes.
 asm(
   SYM(__real_longjmp) ":\n"
-  "ldr r12, =" SYM(longjmp) "\n"
-  "bx  r12\n");
+  "b " SYM(longjmp) "\n");
+#elif defined(__riscv)
+asm(
+  SYM(__real_longjmp) ":\n"
+  "tail " SYM(longjmp) "\n");
 #elif defined(__x86_64__)
+asm(
+  SYM(__real_longjmp) ":\n"
+  "jmp " SYM(longjmp) "\n");
+#elif defined(__i386__)
 asm(
   SYM(__real_longjmp) ":\n"
   "jmp " SYM(longjmp) "\n");

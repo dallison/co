@@ -186,8 +186,8 @@ CMake targets:
 This has been tested on macOS (Apple Silicon), Linux (x86_64), and QNX.
 
 The C++17 library has a custom context switcher implemented in assembly language
-for Linux, macOS, and QNX on x86_64 and ARM64 (Aarch64) architectures. A fallback
-using setjmp/longjmp is also available.
+for Linux, macOS, and QNX on x86, x86_64, ARM, AArch64, RV32, and RV64
+architectures. A fallback using setjmp/longjmp is also available.
 
 The C++20 library uses standard C++20 coroutines and should work on any platform
 with a C++20-compatible compiler (GCC 10+, Clang 17+, MSVC 2019+). On Linux it
