@@ -231,7 +231,7 @@ void __tsan_set_fiber_name(void *fiber, const char *name);
 }
 #endif
 
-#include "toolbelt/poller.h"
+#include "toolbelt/async_waiter.h"
 
 namespace co {
 
@@ -369,7 +369,7 @@ using WaitFd = toolbelt::WaitFd;
 // ThreadSanitizer is also informed about every coroutine context switch via the
 // __tsan_switch_to_fiber API, so cooperative yields between coroutines and the
 // scheduler do not trigger spurious data-race reports.
-class Coroutine : public toolbelt::Poller {
+class Coroutine : public toolbelt::AsyncWaiter {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
   // to duplicate it by calling dup(2) for each coroutine.  The coroutine
@@ -439,7 +439,7 @@ public:
   // Call another coroutine and store the result.
   template <typename T> T Call(Generator<T> &callee) const;
 
-  // For all Poll and Wait functions, see toolbelt::Poller class.
+  // For all Poll and Wait functions, see toolbelt::AsyncWaiter class.
 
   // Note this can cause memory leaks as destructors in the coroutine function
   // will not be called.  Use sparingly.  You should really use an interrupt fd
