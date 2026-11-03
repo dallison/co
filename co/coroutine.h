@@ -240,6 +240,8 @@ void __tsan_set_fiber_name(void *fiber, const char *name);
 }
 #endif
 
+#include "toolbelt/async_waiter.h"
+
 namespace co {
 
 namespace detail {
@@ -291,8 +293,6 @@ extern "C" {
 // This is needed here because it's a friend with C linkage.
 void __co_Invoke(class Coroutine *c);
 }
-
-template <typename T> class Generator;
 
 struct YieldedCoroutine {
   YieldedCoroutine() = default;
@@ -359,11 +359,7 @@ struct CoroutineOptions {
 #if CO_POLL_MODE == CO_POLL_EPOLL
 // This is to provide the epoll equivalent of waiting for a set
 // of pollfds
-struct WaitFd {
-  WaitFd(int f, uint32_t e) : fd(f), events(e) {}
-  int fd;
-  uint32_t events;
-};
+using WaitFd = toolbelt::WaitFd;
 #endif
 
 // This is a Coroutine.  It executes its function (pointer to a function
@@ -382,7 +378,7 @@ struct WaitFd {
 // ThreadSanitizer is also informed about every coroutine context switch via the
 // __tsan_switch_to_fiber API, so cooperative yields between coroutines and the
 // scheduler do not trigger spurious data-race reports.
-class Coroutine {
+class Coroutine : public toolbelt::AsyncWaiter {
 public:
   // Important note: when using an interrupt_fd, you need to be careful
   // to duplicate it by calling dup(2) for each coroutine.  The coroutine
@@ -440,87 +436,19 @@ public:
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
                   opts.user_data) {}
-  virtual ~Coroutine();
+  ~Coroutine() override;
 
   // Start a coroutine running if it is not already running,
   void Start();
 
   // Yield control to another coroutine.
-  void Yield() const;
+  void Yield() const override;
   void YieldToScheduler() const;
 
   // Call another coroutine and store the result.
   template <typename T> T Call(Generator<T> &callee) const;
 
-  // returns -1 for no fd ready, fd if one is ready.
-  int Poll(const std::vector<int> &fds, short event_mask = POLLIN) const;
-  int Poll(const std::vector<struct pollfd> &fds) const;
-
-  // For all Wait functions, the timeout is optional and if greater than zero
-  // specifies a nanosecond timeout.  If the timeout occurs before the fd (or
-  // one of the fds) becomes ready, Wait will return -1. If an fd is ready, Wait
-  // will return the fd that terminated the wait.
-
-  // Wait for a file descriptor to become ready.  Returns the fd if it
-  // was triggered or -1 for timeout.
-  int Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0) const;
-
-  // Wait for a set of fds, all with the same event mask.
-  int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-           uint64_t timeout_ns = 0) const;
-
-  // Poll first and if the fd is not ready, wait for it.
-  int PollAndWait(int fd, uint32_t event_mask = POLLIN,
-                  uint64_t timeout_ns = 0) const;
-
-  // Wait for a set of fds, all with the same event mask.
-  int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-                  uint64_t timeout_ns = 0) const;
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0) const;
-  int PollAndWait(const std::vector<WaitFd> &fds,
-                  uint64_t timeout_ns = 0) const;
-#else
-  // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-  int Wait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
-
-  // Wait for a set of pollfds.  Each needs to specify an fd and an event.
-  // Returns the fd that was triggered, or -1 for a timeout.
-  int Wait(const std::vector<struct pollfd> &fds,
-           uint64_t timeout_ns = 0) const;
-  // Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-  int PollAndWait(struct pollfd &fd, uint64_t timeout_ns = 0) const;
-
-  // Wait for a set of pollfds.  Each needs to specify an fd and an event.
-  // Returns the fd that was triggered, or -1 for a timeout.
-  int PollAndWait(const std::vector<struct pollfd> &fds,
-                  uint64_t timeout_ns = 0) const;
-#endif
-
-  // Templated waits with chrono timeouts.
-  template <class T, class Rep, class Period>
-  int Wait(const T &fd, uint32_t events,
-           std::chrono::duration<Rep, Period> duration) const {
-    return Wait(fd, events, detail::ChronoToNanoseconds(duration));
-  }
-
-  template <class T, class Rep, class Period>
-  int Wait(const T &fd, std::chrono::duration<Rep, Period> duration) const {
-    return Wait(fd, POLLIN, detail::ChronoToNanoseconds(duration));
-  }
-
-  template <class T, class Rep, class Period>
-  int PollAndWait(const T &fd, uint32_t events,
-                  std::chrono::duration<Rep, Period> duration) const {
-    return PollAndWait(fd, events, detail::ChronoToNanoseconds(duration));
-  }
-
-  template <class T, class Rep, class Period>
-  int PollAndWait(const T &fd,
-                  std::chrono::duration<Rep, Period> duration) const {
-    return PollAndWait(fd, POLLIN, detail::ChronoToNanoseconds(duration));
-  }
+  // For all Poll and Wait functions, see toolbelt::AsyncWaiter class.
 
   // Note this can cause memory leaks as destructors in the coroutine function
   // will not be called.  Use sparingly.  You should really use an interrupt fd
@@ -529,18 +457,7 @@ public:
   void Exit() const;
 
   // Sleeping functions.
-  void Nanosleep(uint64_t ns) const;
-  void Millisleep(time_t msecs) const {
-    Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
-  }
-  void Sleep(time_t secs) const {
-    Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
-  }
-
-  template <class Rep, class Period>
-  void Sleep(std::chrono::duration<Rep, Period> duration) const {
-    Nanosleep(detail::ChronoToNanoseconds(duration));
-  }
+  void Nanosleep(uint64_t ns) const override;
 
   // Abort the coroutine.  It will cause the current wait or sleep to throw an
   // internal exception which will unwind the stack.  It will also set the
@@ -587,6 +504,10 @@ public:
   size_t GetStackSize() const { return stack_.size(); }
 
 protected:
+  void AddToUserWaitFds(int fd, uint32_t event_mask) const override;
+  int WaitOnUserWaitFds(uint64_t timeout_ns) const override;
+  int PollWithMutableFds(std::vector<struct pollfd> &fds) const override;
+
   enum class State {
     kCoNew,
     kCoReady,
@@ -673,7 +594,7 @@ protected:
   mutable bool posix_timer_active_ = false;
   mutable int posix_timer_read_fd_ = -1; // Read end of pipe (timer fd)
 #endif
-
+  
   // Function used to create a string for this coroutine.
   std::function<std::string()> to_string_callback_;
 #if CO_HAVE_VALGRIND
@@ -695,10 +616,10 @@ protected:
 // first call.
 template <typename T> class Generator : public Coroutine {
 public:
-  Generator(CoroutineScheduler &scheduler, GeneratorFunction<T> function,
+  Generator(CoroutineScheduler &parent, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(scheduler,
+      : Coroutine(parent,
                   [function = std::move(function)](const Coroutine &c) {
                     function(reinterpret_cast<Generator<T> *>(
                         const_cast<Coroutine *>(&c)));
@@ -706,10 +627,10 @@ public:
                   name, interrupt_fd, /*autostart=*/false, stack_size,
                   user_data) {}
 
-  Generator(CoroutineScheduler &scheduler, GeneratorFunctionRef<T> function,
+  Generator(CoroutineScheduler &parent, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
             size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
-      : Coroutine(scheduler,
+      : Coroutine(parent,
                   [this](const Coroutine &c) {
                     gen_function_(reinterpret_cast<const Generator<T> &>(c));
                   },
@@ -744,10 +665,6 @@ public:
   // This function is thread-safe since a common pattern is to "Run()"
   // the coroutines in a background thread.
   void Stop();
-
-  void AddCoroutine(Coroutine *c);
-  void RemoveCoroutine(const Coroutine *c);
-  void StartCoroutine(Coroutine *c);
 
   int GetInterruptFd() const { return co_interrupt_fd_.poll_fd; }
 
@@ -804,6 +721,9 @@ protected:
   friend class Coroutine;
   template <typename T> friend class Generator;
   friend int MakeTimer(const Coroutine *coroutine, uint64_t ns);
+
+  void AddCoroutine(Coroutine *c);
+  void RemoveCoroutine(const Coroutine *c);
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   void AddEpollFd(int fd, uint32_t events);
@@ -868,8 +788,7 @@ inline void Generator<T>::YieldValue(const T &value) const {
 
 template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
   T result;
-  // Tell the callee that it's being called and where to store the value.
-  callee.caller_ = this;
+  // Tell the callee where to store the value.
   callee.result_ = &result;
   CallNonTemplate(callee);
   // Call done.  No result now.
@@ -889,74 +808,31 @@ template <typename T> inline T Coroutine::Call(Generator<T> &callee) const {
 extern thread_local const co::Coroutine *self;
 extern thread_local co::CoroutineScheduler *scheduler;
 
-void Yield();
+inline void Yield() { self->Yield(); }
 
-int Poll(const std::vector<int> &fds, short event_mask = POLLIN);
-int Poll(const std::vector<struct pollfd> &fds);
+template <typename... Args>
+auto Poll(Args&&... args) { return self->Poll(std::forward<Args>(args)...); }
 
-int Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
+template <typename... Args>
+auto Wait(Args&&... args) { return self->Wait(std::forward<Args>(args)...); }
 
-// Wait for a set of fds, all with the same event mask.
-int Wait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-         uint64_t timeout_ns = 0);
-
-// Poll first and if the fd is not ready, wait for it.
-int PollAndWait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
-
-// Wait for a set of fds, all with the same event mask.
-int PollAndWait(const std::vector<int> &fd, uint32_t event_mask = POLLIN,
-                uint64_t timeout_ns = 0);
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-int Wait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
-int PollAndWait(const std::vector<WaitFd> &fds, uint64_t timeout_ns = 0);
-#else
-// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-int Wait(struct pollfd &fd, uint64_t timeout_ns = 0);
-
-// Wait for a set of pollfds.  Each needs to specify an fd and an event.
-// Returns the fd that was triggered, or -1 for a timeout.
-int Wait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns = 0);
-// Wait for a pollfd.   Returns the fd if it was triggered or -1 for timeout.
-int PollAndWait(struct pollfd &fd, uint64_t timeout_ns = 0);
-
-// Wait for a set of pollfds.  Each needs to specify an fd and an event.
-// Returns the fd that was triggered, or -1 for a timeout.
-int PollAndWait(const std::vector<struct pollfd> &fds, uint64_t timeout_ns = 0);
-#endif
-
-template <class T, class Rep, class Period>
-int Wait(const T &fd, uint32_t events,
-         std::chrono::duration<Rep, Period> duration) {
-  return self->Wait(fd, events, duration);
-}
-
-template <class T, class Rep, class Period>
-int Wait(const T &fd, std::chrono::duration<Rep, Period> duration) {
-  return self->Wait<T, Rep, Period>(fd, duration);
-}
-
-template <class T, class Rep, class Period>
-int PollAndWait(const T &fd, uint32_t events,
-                std::chrono::duration<Rep, Period> duration) {
-  return self->PollAndWait(fd, events, duration);
-}
-
-template <class T, class Rep, class Period>
-int PollAndWait(const T &fd, std::chrono::duration<Rep, Period> duration) {
-  return self->PollAndWait(fd, duration);
-}
+template <typename... Args>
+auto PollAndWait(Args&&... args) { return self->PollAndWait(std::forward<Args>(args)...); }
 
 // Note this can cause memory leaks as destructors in the coroutine function
 // will not be called.  Use sparingly.  You should really use an interrupt fd
 // to cause the function to exit cleanly, but this can get you out of stick
 // situations if you need it.
-void Exit();
+inline void Exit() { return self->Exit(); }
 
 // Sleeping functions.
-void Nanosleep(uint64_t ns);
-void Millisleep(time_t msecs);
-void Sleep(time_t secs);
+inline void Nanosleep(uint64_t ns) { return self->Nanosleep(ns); }
+inline void Millisleep(time_t msecs) {
+  Nanosleep(static_cast<uint64_t>(msecs) * 1000000LL);
+}
+inline void Sleep(time_t secs) {
+  Nanosleep(static_cast<uint64_t>(secs) * 1000000000LL);
+}
 
 template <class Rep, class Period>
 void Sleep(std::chrono::duration<Rep, Period> duration) {

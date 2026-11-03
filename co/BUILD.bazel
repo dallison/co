@@ -30,6 +30,7 @@ cc_library(
         "//:macos_default": [],
         "//conditions:default": ["@abseil-cpp//absl/container:flat_hash_map"],
     }) + [
+        "@cpp_toolbelt//toolbelt",
         "@abseil-cpp//absl/container:flat_hash_set",
     ],
 )
