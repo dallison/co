@@ -509,6 +509,7 @@ void Coroutine::SetState(State state) const {
   state_ = state;
 }
 
+CO_DISABLE_THREAD_SANITIZER
 void Coroutine::Exit() const {
   // Tell TSan we are leaving the coroutine fiber and returning to the
   // scheduler before we actually switch stacks.
@@ -897,6 +898,7 @@ void Coroutine::YieldNonTemplate() const {
   }
 }
 
+CO_DISABLE_THREAD_SANITIZER
 void Coroutine::InvokeFunction() {
   try {
     function_(*this);
@@ -907,15 +909,10 @@ void Coroutine::InvokeFunction() {
   __sanitizer_finish_switch_fiber(nullptr, nullptr, nullptr);
 #endif
   // The coroutine body has returned; the assembly trampoline (or the
-  // ucontext uc_link/getcontext+setcontext path) is about to longjmp/setcontext
-  // back to the scheduler.  Tell TSan we are switching fibers before that
-  // happens.  We use the no-sync flag because there is nothing the scheduler
-  // can synchronize with on a dying coroutine.
-#if defined(CO_THREAD_SANITIZER)
-  if (scheduler_.tsan_fiber_ != nullptr) {
-    __tsan_switch_to_fiber(scheduler_.tsan_fiber_, 0);
-  }
-#endif
+  // ucontext uc_link/getcontext+setcontext path) is about to switch back to
+  // the scheduler.  This function and __co_Invoke must not have TSan
+  // entry/exit hooks because they return after changing fibers.
+  CO_TSAN_SWITCH_TO_FIBER(scheduler_.tsan_fiber_);
 }
 
 // We use an intermediate function to do the invocation of
@@ -924,6 +921,7 @@ void Coroutine::InvokeFunction() {
 // the Resume function.  A new compiler might change the
 // name mangling rules and that would break the build.
 extern "C" {
+CO_DISABLE_THREAD_SANITIZER
 void __co_Invoke(Coroutine *c) { c->InvokeFunction(); }
 }
 
