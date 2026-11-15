@@ -54,7 +54,19 @@
 
 #ifdef CO_THREAD_SANITIZER
 #ifndef CO_DISABLE_THREAD_SANITIZER
+#if defined(__has_attribute)
+#if __has_attribute(disable_sanitizer_instrumentation)
+// Clang's no_sanitize("thread") still emits TSan function entry/exit hooks.
+// Those hooks cannot span a stack switch, so suppress all sanitizer
+// instrumentation in functions that perform one.
+#define CO_DISABLE_THREAD_SANITIZER                                           \
+  __attribute__((disable_sanitizer_instrumentation))
+#else
 #define CO_DISABLE_THREAD_SANITIZER __attribute__((no_sanitize("thread")))
+#endif
+#else
+#define CO_DISABLE_THREAD_SANITIZER __attribute__((no_sanitize("thread")))
+#endif
 #endif // CO_DISABLE_THREAD_SANITIZER
 #else
 #define CO_DISABLE_THREAD_SANITIZER

@@ -3,6 +3,7 @@
 #include "coroutine_cpp20.h"
 #include <gtest/gtest.h>
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/eventfd.h>
@@ -359,6 +360,56 @@ TEST(Cpp20Free, Wait) {
   EXPECT_TRUE(reader_done);
   EXPECT_EQ("ABCDEFGHIJ", result);
 }
+
+#if CO_POLL_MODE == CO_POLL_POLL
+// A socketpair is always writable.  A POLLIN waiter and a POLLOUT waiter on
+// the same fd must each wake only for their own event.  Before the fix the
+// scheduler polled with POLLIN|POLLOUT and resumed every waiter on the fd.
+TEST(Cpp20Free, WaitMaskOnSharedFdWakesOnlyMatchingWaiter) {
+  Scheduler sched;
+  int sv[2];
+  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+
+  // Nonblocking, so a wakeup without data cannot block the scheduler thread.
+  ASSERT_EQ(0, fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL) | O_NONBLOCK));
+
+  int reader_wakeups_before_data = -1;
+  int reader_wakeups = 0;
+  bool writer_done = false;
+
+  sched.Spawn([&sv, &reader_wakeups]() -> Task {
+    for (;;) {
+      int fd = co_await co20::Wait(sv[0], POLLIN);
+      reader_wakeups++;
+      if (fd != sv[0]) co_return;
+      char buf[1];
+      if (read(sv[0], buf, 1) == 1) co_return;
+    }
+  }, "reader");
+
+  sched.Spawn([&sv, &reader_wakeups, &reader_wakeups_before_data,
+               &writer_done]() -> Task {
+    // Writable right away, so this waiter resumes without the reader's data.
+    int fd = co_await co20::Wait(sv[0], POLLOUT);
+    EXPECT_EQ(sv[0], fd);
+    // Let the reader run and check that it is still waiting.
+    co_await co20::Sleep(1000000ULL);
+    reader_wakeups_before_data = reader_wakeups;
+    char v = 'x';
+    EXPECT_EQ(1, write(sv[1], &v, 1));
+    writer_done = true;
+    co_return;
+  }, "writer");
+
+  sched.Run();
+
+  EXPECT_TRUE(writer_done);
+  EXPECT_EQ(0, reader_wakeups_before_data);
+  EXPECT_EQ(1, reader_wakeups);
+  close(sv[0]);
+  close(sv[1]);
+}
+#endif
 
 TEST(Cpp20Free, Sleep) {
   Scheduler sched;
