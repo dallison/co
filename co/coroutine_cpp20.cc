@@ -170,6 +170,7 @@ void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
     }
 
     coroutine_fds_.erase(fd_it);
+    wait_masks_.erase(coroutine);
   }
 
   // Also clean up interrupt FD waiting list.
@@ -235,6 +236,8 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
     coroutine_fds_[coroutine] = fd;
   }
 
+  wait_masks_[coroutine] = event_mask;
+
   // Add coroutine to waiting list for this FD.
   [[maybe_unused]] bool fd_already_tracked = waiting_fds_.count(fd) > 0;
   auto& wait_list = waiting_fds_[fd];
@@ -261,6 +264,7 @@ void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
                         wait_list.end());
         if (wait_list.empty()) waiting_fds_.erase(fd);
         coroutine_fds_.erase(coroutine);
+        wait_masks_.erase(coroutine);
         coroutine->SetWaitResult(-1);
         coroutine->SetState(Coroutine::State::kReady);
         ready_queue_.push_back(coroutine);
@@ -529,6 +533,7 @@ void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
 #endif
     }
     coroutine_fds_.erase(it);
+    wait_masks_.erase(coroutine);
   }
 
   // Also detach from interrupt FD waiting list if present.
@@ -671,9 +676,16 @@ void Scheduler::ProcessEvents() {
   std::vector<std::vector<Coroutine*>> coroutines_per_fd;
 
   for (auto& [fd, coroutine_list] : waiting_fds_) {
+    // Poll only for what the waiters asked for.  A socketpair is always
+    // writable, so polling for POLLOUT on behalf of a POLLIN waiter would
+    // report it ready on every pass.
+    uint32_t mask = 0;
+    for (Coroutine* c : coroutine_list) {
+      mask |= WaitMaskFor(c, fd);
+    }
     struct pollfd pfd;
     pfd.fd = fd;
-    pfd.events = POLLIN | POLLOUT;
+    pfd.events = static_cast<short>(mask);
     pfd.revents = 0;
     pfds.push_back(pfd);
     coroutines_per_fd.push_back(coroutine_list);
@@ -709,13 +721,27 @@ void Scheduler::ProcessEvents() {
   }
 
   for (size_t i = 0; i < coroutines_per_fd.size(); i++) {
-    if (pfds[i].revents & (POLLIN | POLLOUT | POLLHUP)) {
-      std::vector<Coroutine*> to_resume = coroutines_per_fd[i];
-      for (Coroutine* c : to_resume) {
-        ResumeCoroutine(c, pfds[i].fd);
+    const int fd = pfds[i].fd;
+    const short revents = pfds[i].revents;
+    if (revents == 0) continue;
+    // Errors and hangups wake every waiter.  Anything else wakes only the
+    // waiters that asked for one of the events that is ready.
+    std::vector<Coroutine*> to_resume = coroutines_per_fd[i];
+    for (Coroutine* c : to_resume) {
+      if (revents & (WaitMaskFor(c, fd) | POLLHUP | POLLERR)) {
+        ResumeCoroutine(c, fd);
       }
     }
   }
+}
+
+uint32_t Scheduler::WaitMaskFor(Coroutine* coroutine, int fd) const {
+  auto fd_it = coroutine_fds_.find(coroutine);
+  if (fd_it == coroutine_fds_.end() || fd_it->second != fd) {
+    return POLLIN;
+  }
+  auto mask_it = wait_masks_.find(coroutine);
+  return mask_it == wait_masks_.end() ? POLLIN : mask_it->second;
 }
 
 void Scheduler::Run() {

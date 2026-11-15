@@ -212,6 +212,9 @@ public:
 private:
   void ProcessReadyCoroutines();
   void ProcessEvents();
+  // The events a coroutine asked for on fd.  A coroutine that is waiting on
+  // another fd (its interrupt or timer fd) waits for readability.
+  uint32_t WaitMaskFor(Coroutine* coroutine, int fd) const;
   void CleanupCoroutine(Coroutine* coroutine);
   void CleanupTimeoutFd(Coroutine* coroutine);
   void TriggerInterrupt();
@@ -224,6 +227,8 @@ private:
   std::deque<Coroutine*> ready_queue_;
   absl::flat_hash_map<int, std::vector<Coroutine*>> waiting_fds_;
   absl::flat_hash_map<Coroutine*, int> coroutine_fds_;
+  // The event mask each coroutine passed to WaitForFd for coroutine_fds_.
+  absl::flat_hash_map<Coroutine*, uint32_t> wait_masks_;
   absl::flat_hash_set<int> timerfds_;
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
