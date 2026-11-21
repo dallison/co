@@ -348,12 +348,64 @@ struct EventFd {
   static EventFd CreateAbort();
 };
 
+// Manages the memory backing a coroutine's stack.  By default the stack is
+// allocated from the heap via std::vector<char>.  When a guard page is
+// requested, the stack is allocated via mmap with an inaccessible (PROT_NONE)
+// guard page immediately below the lowest usable stack address so that stack
+// overflows trigger a signal (SIGSEGV/SIGBUS) instead of silently corrupting
+// adjacent heap memory.
+class CoroutineStack {
+public:
+  CoroutineStack() = default;
+  ~CoroutineStack();
+
+  CoroutineStack(const CoroutineStack &) = delete;
+  CoroutineStack &operator=(const CoroutineStack &) = delete;
+  CoroutineStack(CoroutineStack &&) = delete;
+  CoroutineStack &operator=(CoroutineStack &&) = delete;
+
+  void Allocate(size_t size, bool guard_page);
+
+  char *data() { return data_; }
+  const char *data() const { return data_; }
+  size_t size() const { return size_; }
+
+  const void *guard_page() const { return guard_page_; }
+  size_t guard_size() const { return guard_size_; }
+  bool has_guard_page() const { return guard_page_ != nullptr; }
+
+  // Returns true if `addr` falls within this stack's guard page.
+  // Async-signal-safe once Allocate() has completed.
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  bool IsGuardAddress(const void *addr) const {
+    if (guard_page_ == nullptr || addr == nullptr) {
+      return false;
+    }
+    const uintptr_t target = reinterpret_cast<uintptr_t>(addr);
+    const uintptr_t start = reinterpret_cast<uintptr_t>(guard_page_);
+    return target >= start && target < start + guard_size_;
+  }
+
+private:
+  void Release();
+
+  std::vector<char> heap_stack_; // Used when guard_page is false.
+  void *mapping_ = nullptr;      // mmap base when guard_page is true.
+  size_t mapping_size_ = 0;      // Total mmap size (guard page + usable stack).
+  void *guard_page_ = nullptr;   // Base of PROT_NONE guard page.
+  size_t guard_size_ = 0;        // Guard page size in bytes.
+  char *data_ = nullptr;         // Lowest usable stack address.
+  size_t size_ = 0;              // Usable stack size in bytes.
+};
+
 struct CoroutineOptions {
   std::string name;
   int interrupt_fd = -1;
   bool autostart = true;
   size_t stack_size = kCoDefaultStackSize;
   void *user_data = nullptr;
+  bool guard_page = false;
 };
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -386,7 +438,8 @@ public:
   // fd in two coroutines.  In fact, when using epoll, it won't be allowed.
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr,
+            bool guard_page = false);
 
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunction function,
             std::string name, size_t stack_size)
@@ -400,11 +453,12 @@ public:
       : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
-                  opts.user_data) {}
+                  opts.user_data, opts.guard_page) {}
 
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr,
+            bool guard_page = false);
 
   Coroutine(CoroutineScheduler &scheduler, CoroutineFunctionRef function,
             std::string name, size_t stack_size)
@@ -414,7 +468,8 @@ public:
 
   Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
             std::string name = "", int interrupt_fd = -1, bool autostart = true,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr);
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr,
+            bool guard_page = false);
 
   Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
             std::string name, size_t stack_size)
@@ -428,14 +483,14 @@ public:
       : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
-                  opts.user_data) {}
+                  opts.user_data, opts.guard_page) {}
 
   Coroutine(CoroutineScheduler &scheduler, std::function<void()> function,
             CoroutineOptions opts)
       : Coroutine(scheduler, std::move(function), opts.name, opts.interrupt_fd,
                   opts.autostart,
                   opts.stack_size == 0 ? kCoDefaultStackSize : opts.stack_size,
-                  opts.user_data) {}
+                  opts.user_data, opts.guard_page) {}
   ~Coroutine() override;
 
   // Start a coroutine running if it is not already running,
@@ -503,6 +558,15 @@ public:
 
   size_t GetStackSize() const { return stack_.size(); }
 
+  bool HasGuardPage() const { return stack_.has_guard_page(); }
+  const void *GetGuardPage() const { return stack_.guard_page(); }
+  size_t GetGuardPageSize() const { return stack_.guard_size(); }
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  bool IsInGuardPage(const void *addr) const {
+    return stack_.IsGuardAddress(addr);
+  }
+
 protected:
   void AddToUserWaitFds(int fd, uint32_t event_mask) const override;
   int WaitOnUserWaitFds(uint64_t timeout_ns) const override;
@@ -553,7 +617,7 @@ protected:
   int interrupt_fd_;
   bool interrupt_fd_owned_ = false;
   mutable State state_ = State::kCoNew;
-  std::vector<char> stack_;                 // Stack, allocated from malloc.
+  CoroutineStack stack_;                    // Stack storage (heap or guarded mmap).
   mutable void *yielded_address_ = nullptr; // Address at which we've yielded.
   mutable Context resume_;
   mutable Context exit_;
@@ -618,24 +682,26 @@ template <typename T> class Generator : public Coroutine {
 public:
   Generator(CoroutineScheduler &parent, GeneratorFunction<T> function,
             std::string name = "", int interrupt_fd = -1,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr,
+            bool guard_page = false)
       : Coroutine(parent,
                   [function = std::move(function)](const Coroutine &c) {
                     function(reinterpret_cast<Generator<T> *>(
                         const_cast<Coroutine *>(&c)));
                   },
                   name, interrupt_fd, /*autostart=*/false, stack_size,
-                  user_data) {}
+                  user_data, guard_page) {}
 
   Generator(CoroutineScheduler &parent, GeneratorFunctionRef<T> function,
             std::string name = "", int interrupt_fd = -1,
-            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr)
+            size_t stack_size = kCoDefaultStackSize, void *user_data = nullptr,
+            bool guard_page = false)
       : Coroutine(parent,
                   [this](const Coroutine &c) {
                     gen_function_(reinterpret_cast<const Generator<T> &>(c));
                   },
                   name, interrupt_fd, /*autostart=*/false, stack_size,
-                  user_data),
+                  user_data, guard_page),
         gen_function_(function) {}
 
   // Yield control and store value.
@@ -675,6 +741,13 @@ public:
   // coroutines when it is stopped.
   void EnableAborts(bool enabled = true) { aborts_enabled_ = enabled; }
   void SetAbortOnStop(bool abort_on_stop = false) { abort_on_stop_ = abort_on_stop; }
+
+  // Enable stack guard pages for all coroutines subsequently created on this
+  // scheduler.  When enabled, each coroutine stack is backed by an mmap
+  // allocation with a PROT_NONE guard page below the stack so that overflows
+  // raise a signal (SIGSEGV/SIGBUS).
+  void EnableGuardPages(bool enabled = true) { guard_pages_enabled_ = enabled; }
+  bool GuardPagesEnabled() const { return guard_pages_enabled_; }
 
 #if CO_POLL_MODE == CO_POLL_POLL
   // When you don't want to use the Run function, these
@@ -775,6 +848,7 @@ protected:
 #endif
   std::atomic<bool> aborts_enabled_ = true;
   std::atomic<bool> abort_on_stop_ = false;
+  std::atomic<bool> guard_pages_enabled_ = false;
 };
 
 template <typename T>
@@ -838,5 +912,31 @@ template <class Rep, class Period>
 void Sleep(std::chrono::duration<Rep, Period> duration) {
   return self->Sleep(duration);
 }
+
+// Optional callback invoked from the stack-overflow signal handler when a
+// coroutine hits its stack guard page.  Runs in signal-handler context on an
+// alternate signal stack and MUST be async-signal-safe.  If the callback
+// returns, the process is terminated with the original signal (SIGSEGV/SIGBUS).
+using StackOverflowCallback = void (*)(const Coroutine *coroutine,
+                                       void *fault_addr);
+
+// Install an optional process-wide SIGSEGV/SIGBUS handler (and an alternate
+// signal stack for the calling thread) to detect and report coroutine stack
+// overflows when guard pages are enabled.  Not installed by default.
+//
+// If `callback` is nullptr, a diagnostic message identifying the overflowing
+// coroutine, stack size, guard page, and fault address is written to stderr
+// before terminating with the original signal.  Faults outside the active
+// coroutine's guard page are forwarded to the previously installed handler.
+//
+// Because sigaltstack() is per-thread, threads running additional schedulers
+// should also call InstallStackOverflowHandler() (process-wide signal
+// registration is idempotent).  Returns true on success.
+bool InstallStackOverflowHandler(StackOverflowCallback callback = nullptr);
+
+// Restore the previous SIGSEGV/SIGBUS handlers and release the calling
+// thread's alternate signal stack if installed by
+// InstallStackOverflowHandler().  Returns true on success.
+bool UninstallStackOverflowHandler();
 
 } // namespace co

@@ -7,13 +7,23 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
+#include <csignal>
 #include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <mutex>
+
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define CO_MAP_ANON MAP_ANON
+#else
+#define CO_MAP_ANON MAP_ANONYMOUS
+#endif
 
 #include "bitset.h"
 
@@ -323,29 +333,118 @@ asm(
 #endif
 // clang-format on
 
+namespace {
+
+size_t GetSystemPageSize() {
+  const long ps = ::sysconf(_SC_PAGESIZE);
+  if (ps <= 0) {
+    return 4096;
+  }
+  return static_cast<size_t>(ps);
+}
+
+} // namespace
+
+CoroutineStack::~CoroutineStack() { Release(); }
+
+void CoroutineStack::Release() {
+  if (mapping_ != nullptr) {
+    ::munmap(mapping_, mapping_size_);
+    mapping_ = nullptr;
+    mapping_size_ = 0;
+  }
+  heap_stack_.clear();
+  guard_page_ = nullptr;
+  guard_size_ = 0;
+  data_ = nullptr;
+  size_ = 0;
+}
+
+void CoroutineStack::Allocate(size_t size, bool guard_page) {
+  Release();
+
+  if (!guard_page) {
+    heap_stack_.resize(size);
+    data_ = heap_stack_.data();
+    size_ = heap_stack_.size();
+    return;
+  }
+
+  const size_t page_size = GetSystemPageSize();
+  const size_t guard_size = page_size;
+
+  size_t usable_size = size;
+  if (usable_size == 0) {
+    usable_size = page_size;
+  } else {
+    const size_t rem = usable_size % page_size;
+    if (rem != 0) {
+      const size_t pad = page_size - rem;
+      if (usable_size > std::numeric_limits<size_t>::max() - pad) {
+        fprintf(stderr, "Coroutine stack size overflow: %zu\n", size);
+        abort();
+      }
+      usable_size += pad;
+    }
+  }
+
+  if (usable_size > std::numeric_limits<size_t>::max() - guard_size) {
+    fprintf(stderr, "Coroutine stack size overflow: %zu\n", size);
+    abort();
+  }
+  const size_t total_size = guard_size + usable_size;
+
+  // Map the entire region PROT_NONE first so the guard page is never
+  // readable or writable, then enable read/write on the usable stack above it.
+  void *mapping = ::mmap(nullptr, total_size, PROT_NONE,
+                         MAP_PRIVATE | CO_MAP_ANON, -1, 0);
+  if (mapping == MAP_FAILED) {
+    fprintf(stderr, "Failed to mmap coroutine stack (%zu bytes): %s\n",
+            total_size, strerror(errno));
+    abort();
+  }
+
+  char *stack_base = static_cast<char *>(mapping) + guard_size;
+  if (::mprotect(stack_base, usable_size, PROT_READ | PROT_WRITE) != 0) {
+    const int saved_errno = errno;
+    ::munmap(mapping, total_size);
+    fprintf(stderr, "Failed to mprotect coroutine stack (%zu bytes): %s\n",
+            usable_size, strerror(saved_errno));
+    abort();
+  }
+
+  mapping_ = mapping;
+  mapping_size_ = total_size;
+  guard_page_ = mapping;
+  guard_size_ = guard_size;
+  data_ = stack_base;
+  size_ = usable_size;
+}
+
 Coroutine::Coroutine(CoroutineScheduler &parent, CoroutineFunction functor,
                      std::string name, int interrupt_fd, bool autostart,
-                     size_t stack_size, void *user_data)
+                     size_t stack_size, void *user_data, bool guard_page)
     : Coroutine(parent,
                 [functor = std::move(functor)](const Coroutine &c) {
                   functor(const_cast<Coroutine *>(&c));
                 },
-                std::move(name), interrupt_fd, autostart, stack_size,
-                user_data) {}
+                std::move(name), interrupt_fd, autostart, stack_size, user_data,
+                guard_page) {}
 
 Coroutine::Coroutine(CoroutineScheduler &parent,
                      std::function<void()> functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
-                     void *user_data)
+                     void *user_data, bool guard_page)
     : Coroutine(
           parent,
           [functor = std::move(functor)](const Coroutine &) { functor(); },
-          std::move(name), interrupt_fd, autostart, stack_size, user_data) {}
+          std::move(name), interrupt_fd, autostart, stack_size, user_data,
+          guard_page) {}
 
 Coroutine::Coroutine(CoroutineScheduler &parent,
                      CoroutineFunctionRef functor, std::string name,
                      int interrupt_fd, bool autostart, size_t stack_size,
-                     void *user_data)
+                     void *user_data, bool guard_page)
     : scheduler_(parent), function_(std::move(functor)),
       interrupt_fd_(dup(interrupt_fd)), interrupt_fd_owned_(true),
       user_data_(user_data) {
@@ -358,7 +457,11 @@ Coroutine::Coroutine(CoroutineScheduler &parent,
     name_ = std::move(name);
   }
 
-  stack_.resize(stack_size);
+  if (stack_size == 0) {
+    stack_size = kCoDefaultStackSize;
+  }
+  const bool use_guard_page = guard_page || scheduler_.GuardPagesEnabled();
+  stack_.Allocate(stack_size, use_guard_page);
 
 #if CO_CTX_MODE == CO_CTX_UCONTEXT
   getcontext(&resume_);
@@ -1366,6 +1469,8 @@ void CoroutineScheduler::Run() {
     // Build the context/jmp_buf for the yield.  This is where coroutines
     // will yield to.
     GETCONTEXT(yield_);
+    // We are back on the scheduler stack (not inside any coroutine).
+    co::self = nullptr;
 
     // This loop resumes all ready coroutines once each.  It allows
     // the scheduler to scale linearly with the number of ready
@@ -1556,5 +1661,339 @@ std::vector<int> CoroutineScheduler::GetAllFds() const {
 // Non-invasive coroutine functions.
 thread_local const co::Coroutine *self;
 thread_local co::CoroutineScheduler *scheduler;
+
+namespace {
+
+class SignalMessageBuffer {
+public:
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  void Append(const char *s) {
+    if (s == nullptr) {
+      return;
+    }
+    while (*s != '\0' && len_ < sizeof(buf_)) {
+      buf_[len_++] = *s++;
+    }
+  }
+
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  void AppendBounded(const char *s, size_t max_len) {
+    if (s == nullptr) {
+      return;
+    }
+    for (size_t i = 0; i < max_len && s[i] != '\0' && len_ < sizeof(buf_);
+         ++i) {
+      buf_[len_++] = s[i];
+    }
+  }
+
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  void AppendUint(uint64_t val) {
+    char tmp[32];
+    size_t n = 0;
+    do {
+      tmp[n++] = static_cast<char>('0' + (val % 10));
+      val /= 10;
+    } while (val != 0 && n < sizeof(tmp));
+    while (n > 0 && len_ < sizeof(buf_)) {
+      buf_[len_++] = tmp[--n];
+    }
+  }
+
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  void AppendHex(uintptr_t val) {
+    Append("0x");
+    char tmp[2 * sizeof(uintptr_t)];
+    size_t n = 0;
+    static constexpr char kHex[] = "0123456789abcdef";
+    do {
+      tmp[n++] = kHex[val & 0xfU];
+      val >>= 4;
+    } while (val != 0 && n < sizeof(tmp));
+    while (n > 0 && len_ < sizeof(buf_)) {
+      buf_[len_++] = tmp[--n];
+    }
+  }
+
+  CO_DISABLE_ADDRESS_SANITIZER
+  CO_DISABLE_THREAD_SANITIZER
+  void FlushToStderr() const {
+    size_t written = 0;
+    while (written < len_) {
+      const ssize_t n = ::write(STDERR_FILENO, buf_ + written, len_ - written);
+      if (n <= 0) {
+        if (n == -1 && errno == EINTR) {
+          continue;
+        }
+        break;
+      }
+      written += static_cast<size_t>(n);
+    }
+  }
+
+private:
+  char buf_[512];
+  size_t len_ = 0;
+};
+
+struct ThreadAltStack {
+  void *buf = nullptr;
+  size_t size = 0;
+  stack_t prev_ss = {};
+  bool installed = false;
+  pid_t installed_pid = -1;
+
+  bool Install() {
+    const pid_t cur_pid = ::getpid();
+    if (installed && installed_pid == cur_pid) {
+      return true;
+    }
+    if (buf == nullptr) {
+      const size_t min_size = 64 * 1024;
+      const long raw_sigstksz = static_cast<long>(SIGSTKSZ);
+      const size_t sigstksz =
+          raw_sigstksz > 0 ? static_cast<size_t>(raw_sigstksz) : 0;
+      const size_t alloc_size = std::max(min_size, sigstksz);
+
+      void *mem = ::mmap(nullptr, alloc_size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | CO_MAP_ANON, -1, 0);
+      if (mem == MAP_FAILED) {
+        return false;
+      }
+      buf = mem;
+      size = alloc_size;
+    }
+    stack_t ss = {};
+    ss.ss_sp = buf;
+    ss.ss_size = size;
+    ss.ss_flags = 0;
+    if (::sigaltstack(&ss, &prev_ss) != 0) {
+      ::munmap(buf, size);
+      buf = nullptr;
+      size = 0;
+      prev_ss = {};
+      installed = false;
+      installed_pid = -1;
+      return false;
+    }
+    installed = true;
+    installed_pid = cur_pid;
+    return true;
+  }
+
+  bool Uninstall() {
+    if (!installed && buf == nullptr) {
+      return true;
+    }
+    if (installed && installed_pid == ::getpid()) {
+      stack_t restore = prev_ss;
+      if ((restore.ss_flags & SS_DISABLE) != 0) {
+        restore = {};
+        restore.ss_flags = SS_DISABLE;
+        // macOS checks ss_size >= MINSIGSTKSZ even when SS_DISABLE is set.
+        const long raw_min = static_cast<long>(MINSIGSTKSZ);
+        restore.ss_size = raw_min > 0 ? static_cast<size_t>(raw_min) : 0;
+      }
+      if (::sigaltstack(&restore, nullptr) != 0) {
+        // Do not unmap if the alternate stack is currently active.
+        return false;
+      }
+    }
+    if (buf != nullptr) {
+      ::munmap(buf, size);
+      buf = nullptr;
+      size = 0;
+    }
+    prev_ss = {};
+    installed = false;
+    installed_pid = -1;
+    return true;
+  }
+
+  ~ThreadAltStack() { (void)Uninstall(); }
+};
+
+std::mutex g_sig_mutex;
+bool g_sig_handler_installed = false;
+struct sigaction g_prev_sigsegv = {};
+struct sigaction g_prev_sigbus = {};
+std::atomic<StackOverflowCallback> g_overflow_callback{nullptr};
+thread_local ThreadAltStack g_thread_alt_stack;
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void ReraiseWithDefault(int sig) {
+  struct sigaction dfl = {};
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  dfl.sa_flags = 0;
+  ::sigaction(sig, &dfl, nullptr);
+
+  sigset_t unblock;
+  sigemptyset(&unblock);
+  sigaddset(&unblock, sig);
+  ::sigprocmask(SIG_UNBLOCK, &unblock, nullptr);
+
+  ::raise(sig);
+  ::_exit(128 + sig);
+}
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void WriteDefaultOverflowReport(int sig, const Coroutine *co,
+                                void *fault_addr) {
+  SignalMessageBuffer msg;
+  msg.Append("Coroutine stack overflow detected (signal ");
+  msg.AppendUint(static_cast<uint64_t>(sig));
+  if (sig == SIGSEGV) {
+    msg.Append(" / SIGSEGV");
+  } else if (sig == SIGBUS) {
+    msg.Append(" / SIGBUS");
+  }
+  msg.Append("):\n  coroutine: \"");
+  msg.AppendBounded(co->Name().c_str(), 128);
+  msg.Append("\" (id=");
+  msg.AppendUint(co->Id());
+  msg.Append(")\n  stack size: ");
+  msg.AppendUint(co->GetStackSize());
+  msg.Append(" bytes\n  guard page: ");
+  const uintptr_t guard_start =
+      reinterpret_cast<uintptr_t>(co->GetGuardPage());
+  const size_t guard_size = co->GetGuardPageSize();
+  msg.AppendHex(guard_start);
+  msg.Append(" - ");
+  msg.AppendHex(guard_start + guard_size);
+  msg.Append(" (");
+  msg.AppendUint(guard_size);
+  msg.Append(" bytes)\n  fault address: ");
+  msg.AppendHex(reinterpret_cast<uintptr_t>(fault_addr));
+  msg.Append("\n");
+  msg.FlushToStderr();
+}
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void CoroutineStackOverflowSignalHandler(int sig, siginfo_t *info,
+                                         void *ucontext) {
+  if (info != nullptr && co::self != nullptr &&
+      co::self->IsInGuardPage(info->si_addr)) {
+    const StackOverflowCallback cb =
+        g_overflow_callback.load(std::memory_order_acquire);
+    if (cb != nullptr) {
+      cb(co::self, info->si_addr);
+    } else {
+      WriteDefaultOverflowReport(sig, co::self, info->si_addr);
+    }
+    ReraiseWithDefault(sig);
+  }
+
+  // Not a coroutine guard-page fault; forward to the previous handler.
+  const struct sigaction &prev =
+      (sig == SIGSEGV) ? g_prev_sigsegv : g_prev_sigbus;
+  if ((prev.sa_flags & SA_SIGINFO) != 0 && prev.sa_sigaction != nullptr &&
+      prev.sa_sigaction != CoroutineStackOverflowSignalHandler) {
+    if ((prev.sa_flags & SA_RESETHAND) != 0) {
+      struct sigaction dfl = {};
+      dfl.sa_handler = SIG_DFL;
+      sigemptyset(&dfl.sa_mask);
+      ::sigaction(sig, &dfl, nullptr);
+    }
+    prev.sa_sigaction(sig, info, ucontext);
+    return;
+  }
+  if (prev.sa_handler != SIG_DFL && prev.sa_handler != SIG_IGN &&
+      prev.sa_handler != nullptr) {
+    if ((prev.sa_flags & SA_RESETHAND) != 0) {
+      struct sigaction dfl = {};
+      dfl.sa_handler = SIG_DFL;
+      sigemptyset(&dfl.sa_mask);
+      ::sigaction(sig, &dfl, nullptr);
+    }
+    prev.sa_handler(sig);
+    return;
+  }
+  ReraiseWithDefault(sig);
+}
+
+} // namespace
+
+bool InstallStackOverflowHandler(StackOverflowCallback callback) {
+  std::lock_guard<std::mutex> lock(g_sig_mutex);
+
+  const bool alt_was_installed =
+      g_thread_alt_stack.installed &&
+      g_thread_alt_stack.installed_pid == ::getpid();
+  if (!g_thread_alt_stack.Install()) {
+    return false;
+  }
+
+  g_overflow_callback.store(callback, std::memory_order_release);
+
+  if (g_sig_handler_installed) {
+    return true;
+  }
+
+  // Capture existing handlers before installing ours so the signal handler
+  // never observes uninitialized g_prev_* state.
+  if (::sigaction(SIGSEGV, nullptr, &g_prev_sigsegv) != 0 ||
+      ::sigaction(SIGBUS, nullptr, &g_prev_sigbus) != 0) {
+    if (!alt_was_installed) {
+      (void)g_thread_alt_stack.Uninstall();
+    }
+    g_overflow_callback.store(nullptr, std::memory_order_release);
+    return false;
+  }
+  std::atomic_thread_fence(std::memory_order_release);
+
+  struct sigaction sa = {};
+  sa.sa_sigaction = CoroutineStackOverflowSignalHandler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+
+  if (::sigaction(SIGSEGV, &sa, nullptr) != 0) {
+    if (!alt_was_installed) {
+      (void)g_thread_alt_stack.Uninstall();
+    }
+    g_overflow_callback.store(nullptr, std::memory_order_release);
+    return false;
+  }
+
+  if (::sigaction(SIGBUS, &sa, nullptr) != 0) {
+    ::sigaction(SIGSEGV, &g_prev_sigsegv, nullptr);
+    if (!alt_was_installed) {
+      (void)g_thread_alt_stack.Uninstall();
+    }
+    g_overflow_callback.store(nullptr, std::memory_order_release);
+    return false;
+  }
+
+  g_sig_handler_installed = true;
+  return true;
+}
+
+bool UninstallStackOverflowHandler() {
+  std::lock_guard<std::mutex> lock(g_sig_mutex);
+
+  bool ok = true;
+  if (g_sig_handler_installed) {
+    if (::sigaction(SIGSEGV, &g_prev_sigsegv, nullptr) != 0) {
+      ok = false;
+    }
+    if (::sigaction(SIGBUS, &g_prev_sigbus, nullptr) != 0) {
+      ok = false;
+    }
+    g_sig_handler_installed = false;
+    g_overflow_callback.store(nullptr, std::memory_order_release);
+  }
+
+  if (!g_thread_alt_stack.Uninstall()) {
+    ok = false;
+  }
+  return ok;
+}
 
 } // namespace co
