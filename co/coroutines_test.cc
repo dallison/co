@@ -2,8 +2,18 @@
 #include "co/coroutine.h"
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <csignal>
+#include <cstdio>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#if CO_HAVE_VALGRIND
+#include <valgrind/valgrind.h>
+#endif
 
 #define VAR(a) a##__COUNTER__
 #define EVAL_AND_ASSERT_OK(expr) EVAL_AND_ASSERT_OK2(VAR(r_), expr)
@@ -508,4 +518,514 @@ TEST(CoroutinesTest, StopDoesNotLeakIntoALaterRun) {
   scheduler.Spawn([&ran]() { ran = true; });
   scheduler.Run();
   EXPECT_TRUE(ran);
+}
+
+namespace {
+
+constexpr int kGuardSignalDetectedExitCode = 42;
+constexpr int kGuardSignalMismatchExitCode = 99;
+constexpr int kGuardNoOverflowExitCode = 100;
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void GuardPageSignalHandler(int /*sig*/, siginfo_t *info, void * /*ucontext*/) {
+  if (info != nullptr && co::self != nullptr &&
+      co::self->IsInGuardPage(info->si_addr)) {
+    _exit(kGuardSignalDetectedExitCode);
+  }
+  _exit(kGuardSignalMismatchExitCode);
+}
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+__attribute__((noinline))
+int OverflowCoroutineStack(int depth) {
+  if (depth < 0) {
+    return 0;
+  }
+  // Small per-frame allocation so SP steps directly into the guard page
+  // rather than jumping over it.
+  volatile char buf[256];
+  buf[0] = static_cast<char>(depth & 0x7f);
+  buf[sizeof(buf) - 1] = static_cast<char>((depth + 1) & 0x7f);
+  asm volatile("" : : "r"(buf) : "memory");
+  const int sum = static_cast<int>(buf[0]) +
+                  static_cast<int>(buf[sizeof(buf) - 1]);
+  return sum + OverflowCoroutineStack(depth + 1);
+}
+
+int WaitForChild(pid_t pid) {
+  int status = 0;
+  while (waitpid(pid, &status, 0) == -1) {
+    if (errno != EINTR) {
+      return -1;
+    }
+  }
+  return status;
+}
+
+bool SkipIntentionalFaultTest() {
+#if defined(CO_ADDRESS_SANITIZER) || defined(CO_THREAD_SANITIZER)
+  return true;
+#elif CO_HAVE_VALGRIND
+  return RUNNING_ON_VALGRIND != 0;
+#else
+  return false;
+#endif
+}
+
+} // namespace
+
+TEST(CoroutinesTest, GuardPageDisabledByDefault) {
+  co::CoroutineScheduler scheduler;
+  EXPECT_FALSE(scheduler.GuardPagesEnabled());
+
+  co::Coroutine *spawned = scheduler.Spawn([]() {});
+  EXPECT_FALSE(spawned->HasGuardPage());
+  EXPECT_EQ(nullptr, spawned->GetGuardPage());
+  EXPECT_EQ(0u, spawned->GetGuardPageSize());
+  EXPECT_FALSE(spawned->IsInGuardPage(nullptr));
+  EXPECT_EQ(co::kCoDefaultStackSize, spawned->GetStackSize());
+
+  co::Coroutine direct(scheduler, [](co::Coroutine *) {});
+  EXPECT_FALSE(direct.HasGuardPage());
+  EXPECT_EQ(nullptr, direct.GetGuardPage());
+  EXPECT_EQ(0u, direct.GetGuardPageSize());
+
+  scheduler.Run();
+}
+
+TEST(CoroutinesTest, GuardPageEnabledViaOptions) {
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  ASSERT_GT(page_size, 0u);
+
+  co::CoroutineScheduler scheduler;
+  co::CoroutineOptions opts;
+  opts.name = "guarded";
+  opts.stack_size = 10000; // Deliberately not a multiple of page_size.
+  opts.guard_page = true;
+
+  int steps = 0;
+  co::Coroutine *c = scheduler.Spawn(
+      [&steps]() {
+        for (int i = 0; i < 5; ++i) {
+          ++steps;
+          co::Yield();
+        }
+      },
+      opts);
+
+  EXPECT_TRUE(c->HasGuardPage());
+  ASSERT_NE(nullptr, c->GetGuardPage());
+  EXPECT_EQ(page_size, c->GetGuardPageSize());
+  EXPECT_EQ(0u, reinterpret_cast<uintptr_t>(c->GetGuardPage()) % page_size);
+  EXPECT_GE(c->GetStackSize(), opts.stack_size);
+  EXPECT_EQ(0u, c->GetStackSize() % page_size);
+
+  const char *guard_base = static_cast<const char *>(c->GetGuardPage());
+  EXPECT_TRUE(c->IsInGuardPage(guard_base));
+  EXPECT_TRUE(c->IsInGuardPage(guard_base + page_size - 1));
+  EXPECT_FALSE(c->IsInGuardPage(guard_base + page_size));
+  EXPECT_FALSE(c->IsInGuardPage(guard_base - 1));
+  EXPECT_FALSE(c->IsInGuardPage(nullptr));
+
+  scheduler.Run();
+  EXPECT_EQ(5, steps);
+  EXPECT_EQ(nullptr, co::self);
+}
+
+TEST(CoroutinesTest, GuardPageMultipleCoroutinesCleanup) {
+  co::CoroutineScheduler scheduler;
+  scheduler.EnableGuardPages(true);
+
+  int completed = 0;
+  for (int i = 0; i < 64; ++i) {
+    co::Coroutine *c = scheduler.Spawn([&completed]() {
+      co::Yield();
+      ++completed;
+    });
+    ASSERT_TRUE(c->HasGuardPage());
+  }
+
+  scheduler.Run();
+  EXPECT_EQ(64, completed);
+  EXPECT_EQ(nullptr, co::self);
+}
+
+TEST(CoroutinesTest, GuardPageEnabledViaSchedulerAndGenerator) {
+  co::CoroutineScheduler scheduler;
+  scheduler.EnableGuardPages(true);
+  EXPECT_TRUE(scheduler.GuardPagesEnabled());
+
+  int sum = 0;
+  co::Generator<int> gen(scheduler, [](co::Generator<int> *g) {
+    for (int i = 1; i <= 3; ++i) {
+      g->YieldValue(i);
+    }
+  });
+  EXPECT_TRUE(gen.HasGuardPage());
+
+  co::Coroutine *consumer = scheduler.Spawn([&gen, &sum]() {
+    while (gen.IsAlive()) {
+      int v = co::self->Call(gen);
+      if (gen.IsAlive()) {
+        sum += v;
+      }
+    }
+  });
+  EXPECT_TRUE(consumer->HasGuardPage());
+
+  scheduler.EnableGuardPages(false);
+  EXPECT_FALSE(scheduler.GuardPagesEnabled());
+
+  co::Coroutine *unguarded = scheduler.Spawn([]() {});
+  EXPECT_FALSE(unguarded->HasGuardPage());
+
+  // Direct constructor and Generator with explicit guard_page = true when
+  // scheduler default is off.
+  co::Coroutine explicit_guarded(scheduler, [](co::Coroutine *) {}, "explicit",
+                                 -1, true, co::kCoDefaultStackSize, nullptr,
+                                 /*guard_page=*/true);
+  EXPECT_TRUE(explicit_guarded.HasGuardPage());
+
+  co::Generator<int> explicit_gen(
+      scheduler, [](co::Generator<int> *g) { g->YieldValue(7); },
+      "explicit_gen", -1, co::kCoDefaultStackSize, nullptr,
+      /*guard_page=*/true);
+  EXPECT_TRUE(explicit_gen.HasGuardPage());
+
+  int explicit_val = 0;
+  scheduler.Spawn([&explicit_gen, &explicit_val]() {
+    while (explicit_gen.IsAlive()) {
+      int v = co::self->Call(explicit_gen);
+      if (explicit_gen.IsAlive()) {
+        explicit_val += v;
+      }
+    }
+  });
+
+  scheduler.Run();
+  EXPECT_EQ(6, sum);
+  EXPECT_EQ(7, explicit_val);
+}
+
+TEST(CoroutinesTest, GuardPageOverflowDetectedBySignalHandler) {
+  if (SkipIntentionalFaultTest()) {
+    GTEST_SKIP()
+        << "Sanitizers/Valgrind intercept intentional guard page faults";
+  }
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+
+  if (pid == 0) {
+    struct rlimit rl = {0, 0};
+    setrlimit(RLIMIT_CORE, &rl);
+
+    const size_t alt_stack_size =
+        std::max<size_t>(static_cast<size_t>(SIGSTKSZ), 64 * 1024);
+    std::vector<char> alt_stack_mem(alt_stack_size);
+    stack_t ss = {};
+    ss.ss_sp = alt_stack_mem.data();
+    ss.ss_size = alt_stack_mem.size();
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, nullptr) != 0) {
+      _exit(101);
+    }
+
+    struct sigaction sa = {};
+    sa.sa_sigaction = GuardPageSignalHandler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    if (sigaction(SIGSEGV, &sa, nullptr) != 0 ||
+        sigaction(SIGBUS, &sa, nullptr) != 0) {
+      _exit(102);
+    }
+
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions opts;
+    opts.name = "overflower";
+    opts.stack_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    opts.guard_page = true;
+
+    scheduler.Spawn(
+        []() {
+          volatile int result = OverflowCoroutineStack(0);
+          (void)result;
+        },
+        opts);
+    scheduler.Run();
+    _exit(kGuardNoOverflowExitCode);
+  }
+
+  const int status = WaitForChild(pid);
+  ASSERT_NE(-1, status);
+  ASSERT_TRUE(WIFEXITED(status))
+      << "Child did not exit cleanly (signaled=" << WIFSIGNALED(status)
+      << ", term_sig=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0) << ")";
+  EXPECT_EQ(kGuardSignalDetectedExitCode, WEXITSTATUS(status));
+}
+
+TEST(CoroutinesTest, GuardPageOverflowTerminatesWithSignalByDefault) {
+  if (SkipIntentionalFaultTest()) {
+    GTEST_SKIP()
+        << "Sanitizers/Valgrind intercept intentional guard page faults";
+  }
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+
+  if (pid == 0) {
+    struct rlimit rl = {0, 0};
+    setrlimit(RLIMIT_CORE, &rl);
+
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGBUS, SIG_DFL);
+
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions opts;
+    opts.name = "overflower_default";
+    opts.stack_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    opts.guard_page = true;
+
+    scheduler.Spawn(
+        []() {
+          volatile int result = OverflowCoroutineStack(0);
+          (void)result;
+        },
+        opts);
+    scheduler.Run();
+    _exit(kGuardNoOverflowExitCode);
+  }
+
+  const int status = WaitForChild(pid);
+  ASSERT_NE(-1, status);
+  ASSERT_TRUE(WIFSIGNALED(status))
+      << "Child was not terminated by signal (exited=" << WIFEXITED(status)
+      << ", exit_code=" << (WIFEXITED(status) ? WEXITSTATUS(status) : 0) << ")";
+  const int sig = WTERMSIG(status);
+  EXPECT_TRUE(sig == SIGSEGV || sig == SIGBUS) << "Unexpected signal: " << sig;
+}
+
+namespace {
+
+constexpr int kCustomCallbackExitCode = 43;
+constexpr int kPriorHandlerExitCode = 77;
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void CustomOverflowCallback(const co::Coroutine *co, void *fault_addr) {
+  if (co != nullptr && co->IsInGuardPage(fault_addr) &&
+      std::strcmp(co->Name().c_str(), "cb_overflow_co") == 0) {
+    _exit(kCustomCallbackExitCode);
+  }
+  _exit(kGuardSignalMismatchExitCode);
+}
+
+CO_DISABLE_ADDRESS_SANITIZER
+CO_DISABLE_THREAD_SANITIZER
+void PriorSegvHandler(int /*sig*/, siginfo_t * /*info*/, void * /*ucontext*/) {
+  _exit(kPriorHandlerExitCode);
+}
+
+} // namespace
+
+TEST(CoroutinesTest, InstallAndUninstallStackOverflowHandler) {
+  ASSERT_TRUE(co::InstallStackOverflowHandler());
+  // Re-installing is idempotent.
+  ASSERT_TRUE(co::InstallStackOverflowHandler());
+
+  co::CoroutineScheduler scheduler;
+  scheduler.EnableGuardPages(true);
+  bool ran = false;
+  scheduler.Spawn([&ran]() {
+    co::Yield();
+    ran = true;
+  });
+  scheduler.Run();
+  EXPECT_TRUE(ran);
+
+  ASSERT_TRUE(co::UninstallStackOverflowHandler());
+  // Uninstalling again is idempotent.
+  ASSERT_TRUE(co::UninstallStackOverflowHandler());
+}
+
+TEST(CoroutinesTest, StackOverflowHandlerDefaultReport) {
+  if (SkipIntentionalFaultTest()) {
+    GTEST_SKIP()
+        << "Sanitizers/Valgrind intercept intentional guard page faults";
+  }
+
+  int err_pipe[2];
+  ASSERT_EQ(0, pipe(err_pipe));
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+
+  if (pid == 0) {
+    close(err_pipe[0]);
+    dup2(err_pipe[1], STDERR_FILENO);
+    close(err_pipe[1]);
+
+    struct rlimit rl = {0, 0};
+    setrlimit(RLIMIT_CORE, &rl);
+
+    if (!co::InstallStackOverflowHandler()) {
+      _exit(103);
+    }
+
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions opts;
+    opts.name = "my_overflow_co";
+    opts.stack_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    opts.guard_page = true;
+
+    scheduler.Spawn(
+        []() {
+          volatile int result = OverflowCoroutineStack(0);
+          (void)result;
+        },
+        opts);
+    scheduler.Run();
+    _exit(kGuardNoOverflowExitCode);
+  }
+
+  close(err_pipe[1]);
+  std::string stderr_output;
+  char buf[512];
+  ssize_t n = 0;
+  while ((n = read(err_pipe[0], buf, sizeof(buf))) > 0) {
+    stderr_output.append(buf, static_cast<size_t>(n));
+  }
+  close(err_pipe[0]);
+
+  const int status = WaitForChild(pid);
+  ASSERT_NE(-1, status);
+  ASSERT_TRUE(WIFSIGNALED(status))
+      << "Child was not terminated by signal (exited=" << WIFEXITED(status)
+      << ", exit_code=" << (WIFEXITED(status) ? WEXITSTATUS(status) : 0)
+      << "), stderr=" << stderr_output;
+  const int sig = WTERMSIG(status);
+  EXPECT_TRUE(sig == SIGSEGV || sig == SIGBUS) << "Unexpected signal: " << sig;
+
+  EXPECT_NE(std::string::npos,
+            stderr_output.find("Coroutine stack overflow detected"))
+      << stderr_output;
+  EXPECT_NE(std::string::npos, stderr_output.find("\"my_overflow_co\""))
+      << stderr_output;
+  EXPECT_NE(std::string::npos, stderr_output.find("stack size:"))
+      << stderr_output;
+  EXPECT_NE(std::string::npos, stderr_output.find("guard page:"))
+      << stderr_output;
+  EXPECT_NE(std::string::npos, stderr_output.find("fault address:"))
+      << stderr_output;
+}
+
+TEST(CoroutinesTest, StackOverflowHandlerCustomCallback) {
+  if (SkipIntentionalFaultTest()) {
+    GTEST_SKIP()
+        << "Sanitizers/Valgrind intercept intentional guard page faults";
+  }
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+
+  if (pid == 0) {
+    struct rlimit rl = {0, 0};
+    setrlimit(RLIMIT_CORE, &rl);
+
+    if (!co::InstallStackOverflowHandler(CustomOverflowCallback)) {
+      _exit(103);
+    }
+
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions opts;
+    opts.name = "cb_overflow_co";
+    opts.stack_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    opts.guard_page = true;
+
+    scheduler.Spawn(
+        []() {
+          volatile int result = OverflowCoroutineStack(0);
+          (void)result;
+        },
+        opts);
+    scheduler.Run();
+    _exit(kGuardNoOverflowExitCode);
+  }
+
+  const int status = WaitForChild(pid);
+  ASSERT_NE(-1, status);
+  ASSERT_TRUE(WIFEXITED(status))
+      << "Child did not exit cleanly (signaled=" << WIFSIGNALED(status)
+      << ", term_sig=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0) << ")";
+  EXPECT_EQ(kCustomCallbackExitCode, WEXITSTATUS(status));
+}
+
+TEST(CoroutinesTest, StackOverflowHandlerChainsNonGuardFaults) {
+  if (SkipIntentionalFaultTest()) {
+    GTEST_SKIP()
+        << "Sanitizers/Valgrind intercept intentional guard page faults";
+  }
+
+  fflush(nullptr);
+  const pid_t pid = fork();
+  ASSERT_NE(-1, pid);
+
+  if (pid == 0) {
+    struct rlimit rl = {0, 0};
+    setrlimit(RLIMIT_CORE, &rl);
+
+    struct sigaction prev_sa = {};
+    prev_sa.sa_sigaction = PriorSegvHandler;
+    sigemptyset(&prev_sa.sa_mask);
+    prev_sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSEGV, &prev_sa, nullptr) != 0 ||
+        sigaction(SIGBUS, &prev_sa, nullptr) != 0) {
+      _exit(104);
+    }
+
+    if (!co::InstallStackOverflowHandler(CustomOverflowCallback)) {
+      _exit(105);
+    }
+
+    // Trigger a fault on an unrelated PROT_NONE page (not a coroutine guard
+    // page) while inside a guarded coroutine; the prior handler must run.
+    const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+    const int map_anon = MAP_ANON;
+#else
+    const int map_anon = MAP_ANONYMOUS;
+#endif
+    void *unrelated =
+        mmap(nullptr, page_size, PROT_NONE, MAP_PRIVATE | map_anon, -1, 0);
+    if (unrelated == MAP_FAILED) {
+      _exit(106);
+    }
+
+    co::CoroutineScheduler scheduler;
+    co::CoroutineOptions opts;
+    opts.name = "non_guard_fault_co";
+    opts.guard_page = true;
+
+    scheduler.Spawn(
+        [unrelated]() {
+          volatile char *p = static_cast<volatile char *>(unrelated);
+          *p = 1;
+        },
+        opts);
+    scheduler.Run();
+    _exit(kGuardNoOverflowExitCode);
+  }
+
+  const int status = WaitForChild(pid);
+  ASSERT_NE(-1, status);
+  ASSERT_TRUE(WIFEXITED(status))
+      << "Child did not exit cleanly (signaled=" << WIFSIGNALED(status)
+      << ", term_sig=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0) << ")";
+  EXPECT_EQ(kPriorHandlerExitCode, WEXITSTATUS(status));
 }
