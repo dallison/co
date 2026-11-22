@@ -2,7 +2,12 @@
 
 #include "coroutine_cpp20.h"
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <cstdlib>
 #include <fcntl.h>
+#include <stdexcept>
+#include <string>
+#include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
 #if defined(__linux__)
@@ -271,17 +276,22 @@ TEST(Cpp20, AbortSingle) {
 
 TEST(Cpp20Free, Self) {
   Scheduler sched;
+  const Coroutine* spawned = nullptr;
   const Coroutine* captured_self = nullptr;
+  std::string name;
 
-  sched.Spawn([&captured_self]() -> Task {
+  spawned = sched.Spawn([&captured_self, &name]() -> Task {
     captured_self = co20::self;
+    name = co20::self->Name();
     co_return;
   }, "self_test");
 
   sched.Run();
 
-  ASSERT_NE(nullptr, captured_self);
-  EXPECT_EQ("self_test", captured_self->Name());
+  // The coroutine has been destroyed now, so only compare the pointer.
+  EXPECT_EQ(spawned, captured_self);
+  EXPECT_EQ("self_test", name);
+  EXPECT_EQ(nullptr, co20::self);
 }
 
 TEST(Cpp20Free, SchedulerAccess) {
@@ -989,6 +999,529 @@ TEST(Cpp20WaitTimeout, DataArrivesDuringWait) {
 
   sched.Run();
   EXPECT_TRUE(success);
+}
+
+// --- Coroutine lifetime ---
+
+// Counts live instances so tests can see when coroutine frames and captures
+// are destroyed.
+struct LiveCounter {
+  explicit LiveCounter(int* count) : count_(count) { ++*count_; }
+  LiveCounter(const LiveCounter& other) : count_(other.count_) { ++*count_; }
+  ~LiveCounter() { --*count_; }
+  int* count_;
+};
+
+TEST(Cpp20Lifetime, FinishedCoroutinesAreDestroyed) {
+  Scheduler sched;
+  int live = 0;
+  std::vector<std::string> completed;
+  sched.SetCompletionCallback(
+      [&completed](Coroutine* c) { completed.push_back(c->Name()); });
+
+  {
+    LiveCounter counter(&live);
+    sched.Spawn([counter]() -> Task { co_return; }, "first");
+  }
+  sched.Spawn([&live, &sched](Coroutine& co) -> Task {
+    co_await co.Yield();
+    // "first" finished on its first resume, so it is gone by now.
+    EXPECT_EQ(0, live);
+    EXPECT_EQ(1u, sched.NumCoroutines());
+    co_return;
+  }, "second");
+  EXPECT_EQ(1, live);
+  EXPECT_EQ(2u, sched.NumCoroutines());
+
+  sched.Run();
+  EXPECT_EQ(0u, sched.NumCoroutines());
+  EXPECT_EQ(std::vector<std::string>({"first", "second"}), completed);
+}
+
+TEST(Cpp20Lifetime, LongRunningSpawnerDoesNotAccumulateCoroutines) {
+  Scheduler sched;
+  size_t max_coroutines = 0;
+  sched.Spawn([&sched, &max_coroutines](Coroutine& co) -> Task {
+    for (int i = 0; i < 1000; i++) {
+      sched.Spawn([]() -> Task { co_return; });
+      co_await co.Yield();
+      max_coroutines = std::max(max_coroutines, sched.NumCoroutines());
+    }
+    co_return;
+  }, "spawner");
+  sched.Run();
+  EXPECT_LE(max_coroutines, 2u);
+}
+
+ValueTask<int> WaitInNestedTask(Coroutine& co, int fd, int* live) {
+  LiveCounter counter(live);
+  co_await co.Wait(fd, POLLIN);
+  co_return 1;
+}
+
+TEST(Cpp20Lifetime, DestroyingSchedulerDestroysNestedFrames) {
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  int live = 0;
+  {
+    Scheduler sched;
+    sched.Spawn([&pipes, &live](Coroutine& co) -> Task {
+      LiveCounter outer(&live);
+      co_await WaitInNestedTask(co, pipes[0], &live);
+      co_return;
+    }, "waiter");
+    sched.Spawn([&sched](Coroutine& co) -> Task {
+      co_await co.Yield();
+      sched.Stop();
+      co_return;
+    }, "stopper");
+    sched.Run();
+    // Both the coroutine frame and the nested ValueTask frame are suspended.
+    EXPECT_EQ(2, live);
+  }
+  EXPECT_EQ(0, live);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+// --- Waiting on several fds ---
+
+TEST(Cpp20MultiWait, ReturnsTheReadyFd) {
+  Scheduler sched;
+  int a[2];
+  int b[2];
+  ASSERT_EQ(0, pipe(a));
+  ASSERT_EQ(0, pipe(b));
+  int result = -1;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    result = co_await co.Wait({a[0], b[0]}, POLLIN);
+    co_return;
+  }, "waiter");
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Yield();
+    char c = 'x';
+    (void)write(b[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  EXPECT_EQ(b[0], result);
+  for (int fd : {a[0], a[1], b[0], b[1]}) close(fd);
+}
+
+TEST(Cpp20MultiWait, MixedEventMasks) {
+  Scheduler sched;
+  int in[2];
+  int out[2];
+  ASSERT_EQ(0, pipe(in));
+  ASSERT_EQ(0, pipe(out));
+  int result = -1;
+
+  sched.Spawn([&]() -> Task {
+    // The write end of a pipe is writable straight away.
+    result = co_await co20::Wait(
+        std::vector<WaitFd>{{in[0], POLLIN}, {out[1], POLLOUT}});
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_EQ(out[1], result);
+  for (int fd : {in[0], in[1], out[0], out[1]}) close(fd);
+}
+
+TEST(Cpp20MultiWait, TimeoutReturnsMinusOne) {
+  Scheduler sched;
+  int a[2];
+  int b[2];
+  ASSERT_EQ(0, pipe(a));
+  ASSERT_EQ(0, pipe(b));
+  int result = 0;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    result = co_await co.Wait(std::vector<int>{a[0], b[0]}, POLLIN, 10000000ULL);
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_EQ(-1, result);
+  for (int fd : {a[0], a[1], b[0], b[1]}) close(fd);
+}
+
+TEST(Cpp20MultiWait, SameFdWaitedOnByTwoCoroutinesWithDifferentMasks) {
+  Scheduler sched;
+  int sv[2];
+  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv));
+  int reader_result = -1;
+  int writer_result = -1;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    reader_result = co_await co.Wait(sv[0], POLLIN);
+    co_return;
+  }, "reader");
+  sched.Spawn([&](Coroutine& co) -> Task {
+    writer_result = co_await co.Wait(sv[0], POLLOUT);
+    char c = 'x';
+    (void)write(sv[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  EXPECT_EQ(sv[0], reader_result);
+  EXPECT_EQ(sv[0], writer_result);
+  close(sv[0]);
+  close(sv[1]);
+}
+
+TEST(Cpp20MultiWait, RegularFileIsReady) {
+  Scheduler sched;
+  char path[] = "/tmp/co20_testXXXXXX";
+  int fd = mkstemp(path);
+  ASSERT_NE(-1, fd);
+  unlink(path);
+  int result = -1;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    result = co_await co.Wait(fd, POLLIN);
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_EQ(fd, result);
+  close(fd);
+}
+
+TEST(Cpp20WaitAll, ReturnsEveryReadyFd) {
+  Scheduler sched;
+  int a[2];
+  int b[2];
+  int c[2];
+  ASSERT_EQ(0, pipe(a));
+  ASSERT_EQ(0, pipe(b));
+  ASSERT_EQ(0, pipe(c));
+  std::vector<WaitFd> ready;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    ready = co_await co.WaitAll({{a[0], POLLIN}, {b[0], POLLIN}, {c[0], POLLIN}});
+    co_return;
+  }, "waiter");
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Yield();
+    char x = 'x';
+    (void)write(a[1], &x, 1);
+    (void)write(c[1], &x, 1);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  ASSERT_EQ(2u, ready.size());
+  EXPECT_EQ(a[0], ready[0].fd);
+  EXPECT_EQ(c[0], ready[1].fd);
+  EXPECT_TRUE(ready[0].events & POLLIN);
+  for (int fd : {a[0], a[1], b[0], b[1], c[0], c[1]}) close(fd);
+}
+
+TEST(Cpp20WaitAll, TimeoutReturnsNothing) {
+  Scheduler sched;
+  int a[2];
+  ASSERT_EQ(0, pipe(a));
+  bool ran = false;
+  std::vector<WaitFd> ready = {{0, 0}};
+
+  sched.Spawn([&]() -> Task {
+    ready = co_await co20::WaitAll({{a[0], POLLIN}}, 10000000ULL);
+    ran = true;
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_TRUE(ran);
+  EXPECT_TRUE(ready.empty());
+  close(a[0]);
+  close(a[1]);
+}
+
+// --- Exceptions ---
+
+ValueTask<int> ThrowAfterYield(Coroutine& co) {
+  co_await co.Yield();
+  throw std::runtime_error("nested failure");
+}
+
+TEST(Cpp20Exceptions, NestedExceptionReachesCaller) {
+  Scheduler sched;
+  std::string caught;
+
+  sched.Spawn([&caught](Coroutine& co) -> Task {
+    try {
+      (void)co_await ThrowAfterYield(co);
+    } catch (const std::runtime_error& e) {
+      caught = e.what();
+    }
+    co_return;
+  }, "caller");
+
+  sched.Run();
+  EXPECT_EQ("nested failure", caught);
+}
+
+ValueTask<void> SleepForever(Coroutine& co) {
+  for (;;) {
+    co_await co.Sleep(std::chrono::seconds(10));
+  }
+}
+
+TEST(Cpp20Exceptions, AbortUnwindsThroughNestedTasks) {
+  Scheduler sched;
+  Coroutine* target = nullptr;
+  bool after_nested_call = false;
+
+  target = sched.Spawn([&after_nested_call](Coroutine& co) -> Task {
+    co_await SleepForever(co);
+    after_nested_call = true;
+    co_return;
+  }, "target");
+  sched.Spawn([&target](Coroutine& co) -> Task {
+    co_await co.Yield();
+    target->Abort();
+    co_return;
+  }, "aborter");
+
+  sched.Run();
+  EXPECT_FALSE(after_nested_call);
+  EXPECT_EQ(0u, sched.NumCoroutines());
+}
+
+TEST(Cpp20Exceptions, AbortingSelfDoesNotBlock) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  bool aborted = false;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co.Abort();
+    try {
+      co_await co.Wait(pipes[0], POLLIN);
+    } catch (const AbortException&) {
+      aborted = true;
+    }
+    co_return;
+  }, "self_abort");
+
+  sched.Run();
+  EXPECT_TRUE(aborted);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20Exceptions, EscapingExceptionIsRethrownFromRun) {
+  Scheduler sched;
+  int live = 0;
+  {
+    LiveCounter counter(&live);
+    sched.Spawn([counter](Coroutine& co) -> Task {
+      co_await co.Yield();
+      throw std::runtime_error("escaped");
+    }, "thrower");
+  }
+  EXPECT_THROW(sched.Run(), std::runtime_error);
+  EXPECT_EQ(0, live);
+  EXPECT_EQ(0u, sched.NumCoroutines());
+}
+
+// --- ValueTask with types that have no default constructor ---
+
+struct NoDefault {
+  explicit NoDefault(int v) : value(v) {}
+  int value;
+};
+
+ValueTask<NoDefault> MakeNoDefault(Coroutine& co) {
+  co_await co.Yield();
+  co_return NoDefault(7);
+}
+
+TEST(Cpp20ValueTask, NonDefaultConstructibleResult) {
+  Scheduler sched;
+  int value = 0;
+  sched.Spawn([&value](Coroutine& co) -> Task {
+    value = (co_await MakeNoDefault(co)).value;
+    co_return;
+  }, "caller");
+  sched.Run();
+  EXPECT_EQ(7, value);
+}
+
+// --- Scheduler control and debugging ---
+
+TEST(Cpp20Scheduler, StopBeforeRunReturnsImmediately) {
+  Scheduler sched;
+  bool ran = false;
+  sched.Spawn([&ran]() -> Task {
+    ran = true;
+    co_return;
+  });
+  sched.Stop();
+  sched.Run();
+  EXPECT_FALSE(ran);
+  // The stop is used up, so the next Run runs the coroutine.
+  sched.Run();
+  EXPECT_TRUE(ran);
+}
+
+TEST(Cpp20Scheduler, IsRunning) {
+  Scheduler sched;
+  bool running_inside = false;
+  sched.Spawn([&]() -> Task {
+    running_inside = sched.IsRunning();
+    co_return;
+  });
+  EXPECT_FALSE(sched.IsRunning());
+  sched.Run();
+  EXPECT_TRUE(running_inside);
+  EXPECT_FALSE(sched.IsRunning());
+}
+
+#if defined(__linux__)
+TEST(Cpp20Scheduler, InterruptFdCopyIsCloseOnExec) {
+  Scheduler sched;
+  int efd = eventfd(0, EFD_NONBLOCK);
+  ASSERT_NE(-1, efd);
+  Coroutine* c = sched.Spawn([]() -> Task { co_return; }, "c", efd);
+  ASSERT_NE(-1, c->GetInterruptFd());
+  EXPECT_TRUE(fcntl(c->GetInterruptFd(), F_GETFD) & FD_CLOEXEC);
+  sched.Run();
+  close(efd);
+}
+#endif
+
+TEST(Cpp20Scheduler, DebugStringsAndFds) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  std::vector<std::string> strings;
+  std::vector<int> fds;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Wait(pipes[0], POLLIN);
+    co_return;
+  }, "waiter");
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Yield();
+    strings = sched.AllCoroutineStrings();
+    fds = sched.GetAllFds();
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_return;
+  }, "inspector");
+
+  sched.Run();
+  ASSERT_EQ(2u, strings.size());
+  EXPECT_NE(std::string::npos, strings[0].find("waiter"));
+  EXPECT_NE(std::string::npos, strings[0].find("waiting"));
+  EXPECT_NE(std::string::npos, strings[1].find("inspector"));
+  EXPECT_NE(fds.end(), std::find(fds.begin(), fds.end(), pipes[0]));
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20AsyncWaiter, IsAnAsyncWaiter) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  int poll_before = -2;
+  int poll_after = -2;
+  int poll_vector = -2;
+  int blocking_wait = -2;
+  int blocking_timeout = -2;
+  bool done = false;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    toolbelt::AsyncWaiter& waiter = co;
+    poll_before = waiter.Poll(std::vector<int>{pipes[0]});
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    poll_after = waiter.Poll(std::vector<int>{pipes[0]});
+    poll_vector = co20::Poll(std::vector<int>{pipes[1]}, POLLOUT);
+    // Through the interface Wait blocks the thread but is otherwise correct.
+    blocking_wait = waiter.Wait(pipes[0]);
+    (void)read(pipes[0], &c, 1);
+    blocking_timeout =
+        waiter.Wait(pipes[0], POLLIN, static_cast<uint64_t>(10'000'000));
+    waiter.Millisleep(1);
+    waiter.Yield();
+    done = true;
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_TRUE(done);
+  EXPECT_EQ(-1, poll_before);
+  EXPECT_EQ(pipes[0], poll_after);
+  EXPECT_EQ(pipes[1], poll_vector);
+  EXPECT_EQ(pipes[0], blocking_wait);
+  EXPECT_EQ(-1, blocking_timeout);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20AsyncWaiter, AwaitableOperationsStillSuspend) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  std::vector<int> order;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    order.push_back(1);
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    EXPECT_EQ(pipes[0], fd);
+    order.push_back(3);
+    co_await co.Millisleep(1);
+    co_await co.Yield();
+    order.push_back(4);
+    co_return;
+  }, "waiter");
+  sched.Spawn([&](Coroutine&) -> Task {
+    order.push_back(2);
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  EXPECT_EQ((std::vector<int>{1, 2, 3, 4}), order);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20AsyncWaiter, InterruptFdEndsBlockingWait) {
+  Scheduler sched;
+  int pipes[2];
+  int interrupt[2];
+  ASSERT_EQ(0, pipe(pipes));
+  ASSERT_EQ(0, pipe(interrupt));
+  char c = 'x';
+  (void)write(interrupt[1], &c, 1);
+  int result = -2;
+  int interrupt_fd = -2;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    toolbelt::AsyncWaiter& waiter = co;
+    interrupt_fd = co.GetInterruptFd();
+    result = waiter.Wait(pipes[0]);
+    co_return;
+  }, "waiter", interrupt[0]);
+
+  sched.Run();
+  EXPECT_EQ(sched.NumCoroutines(), 0u);
+  // Like the awaitable Wait, the result is the coroutine's own copy of the
+  // interrupt fd, not the fd that was passed in.
+  EXPECT_NE(-1, interrupt_fd);
+  EXPECT_EQ(interrupt_fd, result);
+  close(pipes[0]);
+  close(pipes[1]);
+  close(interrupt[0]);
+  close(interrupt[1]);
 }
 
 } // namespace co20

@@ -51,6 +51,8 @@ cc_library(
     deps = [
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:inlined_vector",
+        "@cpp_toolbelt//toolbelt",
     ],
 )
 
