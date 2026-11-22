@@ -48,6 +48,122 @@ TEST(Cpp20, Yield) {
   EXPECT_EQ(2, count);
 }
 
+// A Yield-only coroutine must not starve waiters.  Without a non-blocking
+// poll after each resume, the spinner keeps ready_queue_ non-empty and
+// ProcessEvents is never reached on the poll() backend (macOS), so the
+// reader hangs forever even though data is already in the pipe.
+TEST(Cpp20, YieldDoesNotStarveWaiters) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+
+  bool reader_done = false;
+  int spins = 0;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    EXPECT_EQ(pipes[0], fd);
+    char buf[1];
+    EXPECT_EQ(1, read(pipes[0], buf, 1));
+    reader_done = true;
+    close(pipes[0]);
+    co_return;
+  }, "reader");
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    while (!reader_done) {
+      ++spins;
+      co_await co.Yield();
+    }
+    co_return;
+  }, "spinner");
+
+  sched.Spawn([&](Coroutine&) -> Task {
+    char c = 'x';
+    EXPECT_EQ(1, write(pipes[1], &c, 1));
+    close(pipes[1]);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  EXPECT_TRUE(reader_done);
+  EXPECT_GT(spins, 0);
+  EXPECT_EQ(0u, sched.NumCoroutines());
+}
+
+// When several coroutines become ready together, the one that has been
+// parked longest (lowest LastTick) runs first — same rule as stackful.
+TEST(Cpp20, WaitTimeFairnessPrefersOlderWaiter) {
+  Scheduler sched;
+  int a[2];
+  int b[2];
+  ASSERT_EQ(0, pipe(a));
+  ASSERT_EQ(0, pipe(b));
+
+  std::vector<char> order;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    // Parks first → lower LastTick.
+    int fd = co_await co.Wait(a[0], POLLIN);
+    EXPECT_EQ(a[0], fd);
+    order.push_back('A');
+    char buf[1];
+    (void)read(a[0], buf, 1);
+    co_return;
+  }, "older");
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    // Parks second → higher LastTick after older has suspended.
+    int fd = co_await co.Wait(b[0], POLLIN);
+    EXPECT_EQ(b[0], fd);
+    order.push_back('B');
+    char buf[1];
+    (void)read(b[0], buf, 1);
+    co_return;
+  }, "newer");
+
+  sched.Spawn([&](Coroutine&) -> Task {
+    // Wake both in the same event-loop turn; readiness order must not
+    // override wait-age ordering.
+    char c = 'x';
+    (void)write(b[1], &c, 1);  // newer fd first
+    (void)write(a[1], &c, 1);
+    co_return;
+  }, "waker");
+
+  sched.Run();
+  EXPECT_EQ((std::vector<char>{'A', 'B'}), order);
+  close(a[0]);
+  close(a[1]);
+  close(b[0]);
+  close(b[1]);
+}
+
+// A Yield-only busy loop must not pin the CPU or ignore Stop().  Run parks
+// on the interrupt fd between fair passes so Stop() unblocks it.
+TEST(Cpp20, YieldBusyLoopRespondsToStop) {
+  Scheduler sched;
+  int spins = 0;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    for (;;) {
+      ++spins;
+      co_await co.Yield();
+    }
+  }, "spinner");
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Sleep(std::chrono::milliseconds(20));
+    sched.Stop();
+    co_return;
+  }, "stopper");
+
+  sched.Run();
+  EXPECT_GT(spins, 0);
+  // Spinner is still alive (infinite loop); destroying the scheduler frees it.
+  EXPECT_EQ(1u, sched.NumCoroutines());
+}
+
 TEST(Cpp20, Wait) {
   Scheduler sched;
   int pipes[2];

@@ -99,3 +99,21 @@ cc_test(
     ],
     tags = ["cpp20"],
 )
+
+# High-churn C++20 stress tests.  Longer timeout because some cases create
+# thousands of coroutines / timerfds.
+cc_test(
+    name = "test_cpp20_stress",
+    srcs = [
+        "test_cpp20_stress.cc",
+    ],
+    copts = [
+        "-std=c++20",
+    ],
+    size = "medium",
+    deps = [
+        ":co_cpp20",
+        "@googletest//:gtest_main",
+    ],
+    tags = ["cpp20", "stress"],
+)

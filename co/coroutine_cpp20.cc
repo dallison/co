@@ -315,6 +315,9 @@ void Scheduler::MakeReady(Coroutine* coroutine, int value) {
 void Scheduler::ScheduleCoroutine(Coroutine* coroutine) {
   if (!coroutine) return;
   if (coroutine->GetState() == Coroutine::State::kYielded) {
+    // Stamp wait age before re-queuing so a Yield competes fairly with
+    // Wait/Sleep by how long each has been parked (stackful LastTick rule).
+    coroutine->SetLastTick(tick_count_);
     MakeReady(coroutine, 0);
   }
 }
@@ -422,6 +425,7 @@ void Scheduler::WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_f
                            uint64_t timeout_ns) {
   if (!coroutine) return;
   DetachWaits(coroutine);
+  coroutine->SetLastTick(tick_count_);
   coroutine->SetState(Coroutine::State::kWaiting);
 
   coroutine->wait_fds_.assign(fds, fds + num_fds);
@@ -457,6 +461,8 @@ void Scheduler::WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_f
 
 void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
   if (!coroutine) return;
+  // Sleep(0) is Yield: re-queue with no timer.  A non-zero sleep is needed
+  // to actually park on the event loop.
   if (nanoseconds == 0) {
     coroutine->SetState(Coroutine::State::kYielded);
     ScheduleCoroutine(coroutine);
@@ -604,7 +610,18 @@ void Scheduler::FinishCoroutine(Coroutine* coroutine) {
 }
 
 void Scheduler::ProcessReadyCoroutines() {
-  while (!ready_queue_.empty() && !stop_requested_) {
+  // Prefer coroutines that have been parked longest (lowest LastTick), the
+  // same rule as the stackful scheduler's sort of the poll wake batch.
+  std::stable_sort(ready_queue_.begin(), ready_queue_.end(),
+                   [](const Coroutine* a, const Coroutine* b) {
+                     return a->LastTick() < b->LastTick();
+                   });
+
+  // One fair pass only.  Yield puts the coroutine back on ready_queue_, so
+  // looping until empty would never return when anything is yielding.
+  size_t to_run = ready_queue_.size();
+  while (to_run > 0 && !ready_queue_.empty() && !stop_requested_) {
+    --to_run;
     Coroutine* coroutine = ready_queue_.front();
     ready_queue_.pop_front();
 
@@ -612,20 +629,11 @@ void Scheduler::ProcessReadyCoroutines() {
 
     coroutine->Resume(coroutine->GetWaitResult());
 
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    if (epoll_fd_ != -1 && !waiting_fds_.empty()) {
-      struct epoll_event events[64];
-      int n = epoll_wait(epoll_fd_, events, 64, 0);
-      for (int i = 0; i < n; i++) {
-        if (events[i].data.fd == interrupt_fd_) {
-          uint64_t val;
-          (void)read(interrupt_fd_, &val, sizeof(val));
-          continue;
-        }
-        DispatchFdEvents(events[i].data.fd, EpollToPollEvents(events[i].events));
-      }
-    }
-#endif
+    // Without this, a Yield-only coroutine keeps ready_queue_ non-empty and
+    // Run() never reaches the blocking ProcessEvents() call — so every
+    // Wait/Sleep on the poll() backend (macOS) would hang.  epoll already
+    // did a non-blocking check here; poll() needs the same.
+    PollWaitingFds(/*timeout_ms=*/0);
 
     // A coroutine that is still running suspended in an awaitable that isn't
     // ours; nothing will resume it.
@@ -636,13 +644,13 @@ void Scheduler::ProcessReadyCoroutines() {
   }
 }
 
-void Scheduler::ProcessEvents() {
+void Scheduler::PollWaitingFds(int timeout_ms) {
   if (waiting_fds_.empty()) return;
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   if (epoll_fd_ != -1) {
     struct epoll_event events[64];
-    int n = epoll_wait(epoll_fd_, events, 64, -1);
+    int n = epoll_wait(epoll_fd_, events, 64, timeout_ms);
     for (int i = 0; i < n; i++) {
       if (events[i].data.fd == interrupt_fd_) {
         uint64_t val;
@@ -678,7 +686,7 @@ void Scheduler::ProcessEvents() {
   if (pfds.size() > static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
     return;
   }
-  int ret = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), -1);
+  int ret = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeout_ms);
   if (ret <= 0) return;
 
   if (pfds.back().revents & POLLIN) {
@@ -700,6 +708,53 @@ void Scheduler::ProcessEvents() {
   }
 }
 
+void Scheduler::WaitOnInterrupt(int timeout_ms) {
+  if (interrupt_fd_ == -1) {
+    if (timeout_ms > 0) {
+      struct timespec ts = {};
+      ts.tv_sec = timeout_ms / 1000;
+      ts.tv_nsec = static_cast<long>((timeout_ms % 1000) * 1000000L);
+      nanosleep(&ts, nullptr);
+    }
+    return;
+  }
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  // The interrupt fd is registered on the epoll set at construction.  A
+  // timed epoll_wait still wakes on Stop()/TriggerInterrupt.
+  if (epoll_fd_ != -1) {
+    struct epoll_event events[8];
+    int n = epoll_wait(epoll_fd_, events, 8, timeout_ms);
+    for (int i = 0; i < n; i++) {
+      if (events[i].data.fd == interrupt_fd_) {
+        uint64_t val;
+        (void)read(interrupt_fd_, &val, sizeof(val));
+        continue;
+      }
+      DispatchFdEvents(events[i].data.fd, EpollToPollEvents(events[i].events));
+    }
+    return;
+  }
+#endif
+
+  struct pollfd pfd = {};
+  pfd.fd = interrupt_fd_;
+  pfd.events = POLLIN;
+  if (poll(&pfd, 1, timeout_ms) > 0 && (pfd.revents & POLLIN)) {
+#if defined(__linux__)
+    uint64_t val;
+    (void)read(interrupt_fd_, &val, sizeof(val));
+#else
+    char val;
+    (void)read(interrupt_fd_, &val, 1);
+#endif
+  }
+}
+
+void Scheduler::ProcessEvents() {
+  PollWaitingFds(/*timeout_ms=*/-1);
+}
+
 void Scheduler::Run() {
   running_ = true;
   struct ResetOnExit {
@@ -713,8 +768,18 @@ void Scheduler::Run() {
   while (!stop_requested_) {
     ProcessReadyCoroutines();
     if (stop_requested_) break;
-    if (!ready_queue_.empty()) continue;
-    if (waiting_fds_.empty()) break;
+    if (ready_queue_.empty() && waiting_fds_.empty()) break;
+    if (!ready_queue_.empty()) {
+      // Never block forever while anyone is ready: a Yield-ing producer must
+      // still run to feed waiters.  Park briefly so a Yield-only loop cannot
+      // pin the CPU; wake immediately on interrupt or (if waiters exist) I/O.
+      if (waiting_fds_.empty()) {
+        WaitOnInterrupt(/*timeout_ms=*/1);
+      } else {
+        PollWaitingFds(/*timeout_ms=*/1);
+      }
+      continue;
+    }
     ProcessEvents();
   }
 }
