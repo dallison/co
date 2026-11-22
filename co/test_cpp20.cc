@@ -1425,6 +1425,105 @@ TEST(Cpp20Scheduler, DebugStringsAndFds) {
   close(pipes[1]);
 }
 
+TEST(Cpp20AsyncWaiter, IsAnAsyncWaiter) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  int poll_before = -2;
+  int poll_after = -2;
+  int poll_vector = -2;
+  int blocking_wait = -2;
+  int blocking_timeout = -2;
+  bool done = false;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    toolbelt::AsyncWaiter& waiter = co;
+    poll_before = waiter.Poll(std::vector<int>{pipes[0]});
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    poll_after = waiter.Poll(std::vector<int>{pipes[0]});
+    poll_vector = co20::Poll(std::vector<int>{pipes[1]}, POLLOUT);
+    // Through the interface Wait blocks the thread but is otherwise correct.
+    blocking_wait = waiter.Wait(pipes[0]);
+    (void)read(pipes[0], &c, 1);
+    blocking_timeout =
+        waiter.Wait(pipes[0], POLLIN, static_cast<uint64_t>(10'000'000));
+    waiter.Millisleep(1);
+    waiter.Yield();
+    done = true;
+    co_return;
+  }, "waiter");
+
+  sched.Run();
+  EXPECT_TRUE(done);
+  EXPECT_EQ(-1, poll_before);
+  EXPECT_EQ(pipes[0], poll_after);
+  EXPECT_EQ(pipes[1], poll_vector);
+  EXPECT_EQ(pipes[0], blocking_wait);
+  EXPECT_EQ(-1, blocking_timeout);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20AsyncWaiter, AwaitableOperationsStillSuspend) {
+  Scheduler sched;
+  int pipes[2];
+  ASSERT_EQ(0, pipe(pipes));
+  std::vector<int> order;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    order.push_back(1);
+    int fd = co_await co.Wait(pipes[0], POLLIN);
+    EXPECT_EQ(pipes[0], fd);
+    order.push_back(3);
+    co_await co.Millisleep(1);
+    co_await co.Yield();
+    order.push_back(4);
+    co_return;
+  }, "waiter");
+  sched.Spawn([&](Coroutine&) -> Task {
+    order.push_back(2);
+    char c = 'x';
+    (void)write(pipes[1], &c, 1);
+    co_return;
+  }, "writer");
+
+  sched.Run();
+  EXPECT_EQ((std::vector<int>{1, 2, 3, 4}), order);
+  close(pipes[0]);
+  close(pipes[1]);
+}
+
+TEST(Cpp20AsyncWaiter, InterruptFdEndsBlockingWait) {
+  Scheduler sched;
+  int pipes[2];
+  int interrupt[2];
+  ASSERT_EQ(0, pipe(pipes));
+  ASSERT_EQ(0, pipe(interrupt));
+  char c = 'x';
+  (void)write(interrupt[1], &c, 1);
+  int result = -2;
+  int interrupt_fd = -2;
+
+  sched.Spawn([&](Coroutine& co) -> Task {
+    toolbelt::AsyncWaiter& waiter = co;
+    interrupt_fd = co.GetInterruptFd();
+    result = waiter.Wait(pipes[0]);
+    co_return;
+  }, "waiter", interrupt[0]);
+
+  sched.Run();
+  EXPECT_EQ(sched.NumCoroutines(), 0u);
+  // Like the awaitable Wait, the result is the coroutine's own copy of the
+  // interrupt fd, not the fd that was passed in.
+  EXPECT_NE(-1, interrupt_fd);
+  EXPECT_EQ(interrupt_fd, result);
+  close(pipes[0]);
+  close(pipes[1]);
+  close(interrupt[0]);
+  close(interrupt[1]);
+}
+
 } // namespace co20
 
 #endif // CO20_HAVE_COROUTINES

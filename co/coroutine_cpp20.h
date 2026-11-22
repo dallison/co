@@ -78,6 +78,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
+#include "toolbelt/async_waiter.h"
 #include <vector>
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -121,7 +122,16 @@ template <typename T> struct ValueTask;
 
 // Represents a single C++20 stackless coroutine managed by a Scheduler.  The
 // scheduler owns it and destroys it when its function finishes.
-class Coroutine {
+//
+// Like co::Coroutine it is a toolbelt::AsyncWaiter, so code written against
+// that interface can use it for the non-blocking Poll functions.  A stackless
+// coroutine can't suspend from inside an ordinary function call, though, so the
+// suspending operations (Yield, Wait, Sleep) are declared here as functions that
+// return awaitables to be used with co_await.  They hide the AsyncWaiter
+// versions, which are only reached through a toolbelt::AsyncWaiter reference,
+// and there they block the calling thread, and so every coroutine on the
+// scheduler, instead of suspending.
+class Coroutine : public toolbelt::AsyncWaiter {
 public:
   enum class State {
     kNew,
@@ -145,12 +155,15 @@ public:
   Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "",
             int interrupt_fd = -1);
 
-  ~Coroutine();
+  ~Coroutine() override;
 
   Coroutine(const Coroutine&) = delete;
   Coroutine& operator=(const Coroutine&) = delete;
   Coroutine(Coroutine&&) = delete;
   Coroutine& operator=(Coroutine&&) = delete;
+
+  // Poll (immediately, without blocking) is inherited from
+  // toolbelt::AsyncWaiter.  It also checks the coroutine's interrupt fd.
 
   YieldAwaitable Yield();
 
@@ -174,6 +187,14 @@ public:
   template <typename Rep, typename Period>
   SleepAwaitable Sleep(std::chrono::duration<Rep, Period> duration);
 
+  SleepAwaitable Millisleep(uint64_t milliseconds);
+
+  // The toolbelt::AsyncWaiter interface.  These can't suspend the coroutine,
+  // so they block the calling thread instead.  In a coroutine function use the
+  // awaitable versions above with co_await.
+  void Yield() const override;
+  void Nanosleep(uint64_t ns) const override;
+
   // Make the coroutine throw AbortException at its current or next co_await.
   void Abort();
 
@@ -188,6 +209,13 @@ public:
   // A one-line description of the coroutine for debugging.
   std::string ToString() const;
   void Show() const;
+
+protected:
+  // toolbelt::AsyncWaiter implementation.  The wait is a blocking poll of the
+  // fds added, plus the interrupt fd.
+  void AddToUserWaitFds(int fd, uint32_t event_mask) const override;
+  int WaitOnUserWaitFds(uint64_t timeout_ns) const override;
+  int PollWithMutableFds(std::vector<struct pollfd>& fds) const override;
 
 private:
   void SetHandle(std::coroutine_handle<> handle) { handle_ = handle; }
@@ -217,6 +245,8 @@ private:
   // The fds (other than the interrupt and timeout fds) passed to the wait the
   // coroutine is suspended in.
   WaitFdList wait_fds_;
+  // The fds added by AsyncWaiter::Wait and not yet waited on.
+  mutable std::vector<struct pollfd> user_wait_fds_;
   // An exception other than AbortException that escaped the coroutine
   // function.  Scheduler::Run rethrows it.
   std::exception_ptr exception_;
@@ -597,6 +627,10 @@ inline SleepAwaitable Coroutine::Sleep(std::chrono::duration<Rep, Period> durati
   return Sleep(ns > 0 ? static_cast<uint64_t>(ns) : 0);
 }
 
+inline SleepAwaitable Coroutine::Millisleep(uint64_t milliseconds) {
+  return Sleep(milliseconds * 1000000ULL);
+}
+
 // Thread-local pointers to the currently running coroutine and its scheduler.
 // These are set automatically by the scheduler before each coroutine is resumed,
 // enabling the free functions below. Each thread running a scheduler gets its
@@ -838,6 +872,12 @@ inline WaitAwaitable Wait(const std::vector<int>& fds, uint32_t event_mask = POL
 
 inline WaitAwaitable Wait(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0) {
   return self->Wait(fds, timeout_ns);
+}
+
+// Poll without blocking.  See toolbelt::AsyncWaiter.
+template <typename... Args>
+inline int Poll(Args&&... args) {
+  return self->Poll(std::forward<Args>(args)...);
 }
 
 inline WaitAllAwaitable WaitAll(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0) {

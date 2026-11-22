@@ -117,9 +117,10 @@ free functions in the `co::` namespace:
 
 ## The C++20 API
 
-The C++20 library lives in the `co20::` namespace and is completely standalone
-(no dependency on the C++17 library). It requires a C++20 compiler and uses
-Abseil's `flat_hash_map`/`flat_hash_set` for fast container lookups.
+The C++20 library lives in the `co20::` namespace. It has no dependency on the
+C++17 library, but like `co::Coroutine`, `co20::Coroutine` derives from
+`toolbelt::AsyncWaiter`. It requires a C++20 compiler and uses Abseil's
+`flat_hash_map`/`flat_hash_set` for fast container lookups.
 
 Key differences from the C++17 API:
 - All suspend operations use `co_await`
@@ -134,8 +135,16 @@ Free functions in the `co20::` namespace:
 - `co20::Sleep(std::chrono::duration)` -- sleep for a chrono duration
 - `co20::Millisleep(ms)` -- sleep for milliseconds
 - `co20::Nanosleep(ns)` -- sleep for nanoseconds
+- `co20::Poll(fds, events)` -- check FD readiness without blocking
 - `co20::self` -- pointer to the currently running coroutine
 - `co20::scheduler` -- pointer to the current scheduler
+
+A stackless coroutine can only suspend at a `co_await`, so the `Yield`, `Wait`
+and `Sleep` members of `co20::Coroutine` return awaitables and hide the
+`toolbelt::AsyncWaiter` versions. `Poll` is inherited and never blocks. The
+`AsyncWaiter` versions of the suspending functions are only reachable through a
+`toolbelt::AsyncWaiter&`, and there they block the calling thread (and so every
+coroutine on that scheduler) instead of suspending.
 
 ## Building
 

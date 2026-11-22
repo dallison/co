@@ -98,7 +98,8 @@ target_link_libraries(co PUBLIC
 )
 
 # --- co_cpp20 Library Target ---
-# Standalone C++20 coroutine library (no dependency on 'co' or Abseil)
+# C++20 coroutine library (no dependency on 'co'; depends on toolbelt for the
+# AsyncWaiter interface)
 add_library(co_cpp20 STATIC
     co/coroutine_cpp20.cc
     co/coroutine_cpp20.h
@@ -114,6 +115,7 @@ set_target_properties(co_cpp20 PROPERTIES
 )
 
 target_link_libraries(co_cpp20 PUBLIC
+    toolbelt
     absl::flat_hash_map
     absl::flat_hash_set
     absl::inlined_vector

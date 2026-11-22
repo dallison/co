@@ -22,7 +22,9 @@
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
+#include <chrono>
 #include <limits>
+#include <sched.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -112,6 +114,105 @@ std::string Coroutine::ToString() const {
 }
 
 void Coroutine::Show() const { fprintf(stderr, "%s\n", ToString().c_str()); }
+
+// --- toolbelt::AsyncWaiter implementation ---
+//
+// A stackless coroutine can only suspend at a co_await, so these can't give
+// other coroutines a chance to run.  They are the blocking equivalents.
+
+void Coroutine::Yield() const { sched_yield(); }
+
+void Coroutine::Nanosleep(uint64_t ns) const {
+  struct timespec ts;
+  ts.tv_sec = static_cast<time_t>(
+      std::min<uint64_t>(ns / 1000000000ULL, std::numeric_limits<time_t>::max()));
+  ts.tv_nsec = static_cast<long>(ns % 1000000000ULL);
+  // nanosleep fills in the time remaining if it is interrupted by a signal.
+  while (nanosleep(&ts, &ts) == -1 && errno == EINTR) {
+  }
+}
+
+int Coroutine::PollWithMutableFds(std::vector<struct pollfd>& fds) const {
+  if (interrupt_fd_ != -1) {
+    fds.push_back({.fd = interrupt_fd_, .events = POLLIN, .revents = 0});
+  }
+  if (fds.empty()) {
+    return -1;
+  }
+  int ret;
+  do {
+    ret = poll(fds.data(), static_cast<nfds_t>(fds.size()), 0);
+  } while (ret < 0 && errno == EINTR);
+  if (ret < 0) {
+    return -2;
+  }
+  if (ret == 0) {
+    return -1;
+  }
+  for (const struct pollfd& pfd : fds) {
+    // As in PollFds, errors and hangups make an fd ready.
+    if (pfd.revents & (pfd.events | POLLERR | POLLHUP)) {
+      return pfd.fd;
+    }
+  }
+  return -1;
+}
+
+void Coroutine::AddToUserWaitFds(int fd, uint32_t event_mask) const {
+  user_wait_fds_.push_back(
+      {.fd = fd, .events = static_cast<short>(event_mask), .revents = 0});
+}
+
+int Coroutine::WaitOnUserWaitFds(uint64_t timeout_ns) const {
+  // Take the fds so that they are never left over for the next wait, however
+  // this one ends.
+  std::vector<struct pollfd> fds = std::move(user_wait_fds_);
+  if (interrupt_fd_ != -1) {
+    fds.push_back({.fd = interrupt_fd_, .events = POLLIN, .revents = 0});
+  }
+  if (fds.empty()) {
+    return -1;
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::nanoseconds(std::min<uint64_t>(
+                            timeout_ns, std::numeric_limits<int64_t>::max() / 2));
+  for (;;) {
+    int timeout_ms = -1;
+    if (timeout_ns != 0) {
+      const auto remaining = deadline - std::chrono::steady_clock::now();
+      if (remaining <= std::chrono::nanoseconds::zero()) {
+        return -1;
+      }
+      // Round up so that we don't spin for the last fraction of a millisecond.
+      const int64_t ms =
+          std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+      timeout_ms = static_cast<int>(
+          std::min<int64_t>(ms, std::numeric_limits<int>::max()));
+    }
+    for (struct pollfd& pfd : fds) {
+      pfd.revents = 0;
+    }
+    int ret = poll(fds.data(), static_cast<nfds_t>(fds.size()), timeout_ms);
+    if (ret < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -2;
+    }
+    if (ret == 0) {
+      continue;  // Timed out; the loop decides whether the deadline has passed.
+    }
+    for (const struct pollfd& pfd : fds) {
+      if (pfd.revents & POLLNVAL) {
+        return -2;
+      }
+      if (pfd.revents & (pfd.events | POLLERR | POLLHUP)) {
+        return pfd.fd;
+      }
+    }
+  }
+}
 
 uint32_t Coroutine::WaitMaskFor(int fd) const {
   if (fd == interrupt_fd_ || fd == timeout_fd_) {
@@ -366,9 +467,12 @@ void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
 }
 
 int Scheduler::CreateTimer(uint64_t nanoseconds) {
+#if CO_TIMER_MODE == CO_TIMER_TIMERFD || CO_TIMER_MODE == CO_TIMER_POSIX
+  // macOS has no itimerspec, and the kqueue timer doesn't need one.
   struct itimerspec its = {};
   its.it_value.tv_sec = static_cast<time_t>(nanoseconds / 1000000000ULL);
   its.it_value.tv_nsec = static_cast<long>(nanoseconds % 1000000000ULL);
+#endif
 
 #if CO_TIMER_MODE == CO_TIMER_TIMERFD
   int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
