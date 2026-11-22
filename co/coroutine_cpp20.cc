@@ -577,14 +577,37 @@ void Scheduler::DispatchFdEvents(int fd, uint32_t revents) {
   }
   // Waking a coroutine removes it from the list, so iterate over a copy.
   const std::vector<Coroutine*> waiters = it->second;
+  const bool fatal = (revents & (POLLHUP | POLLERR)) != 0;
+
+  // Hangups/errors: wake every matching waiter (EOF/error is durable).
+  // Otherwise wake only the longest-waiting matching waiter.  Waking every
+  // POLLIN waiter at once is wrong for level-triggered epoll: the first
+  // reader can drain the fd and the rest then block the scheduler thread on
+  // a blocking read.  The stackful scheduler avoids that by re-checking
+  // readiness before each subsequent resume of the same fd; waking one at
+  // a time is the equivalent here (LT epoll will deliver again if data
+  // remains).
+  if (fatal) {
+    for (Coroutine* c : waiters) {
+      if ((revents & (c->WaitMaskFor(fd) | POLLHUP | POLLERR)) == 0) {
+        continue;
+      }
+      ResumeCoroutine(c, fd == c->timeout_fd_ ? -1 : fd);
+    }
+    return;
+  }
+
+  Coroutine* best = nullptr;
   for (Coroutine* c : waiters) {
-    // Errors and hangups wake every waiter.  Anything else wakes only the
-    // waiters that asked for one of the events that is ready.
-    if ((revents & (c->WaitMaskFor(fd) | POLLHUP | POLLERR)) == 0) {
+    if ((revents & c->WaitMaskFor(fd)) == 0) {
       continue;
     }
-    // A timeout makes the wait return -1.
-    ResumeCoroutine(c, fd == c->timeout_fd_ ? -1 : fd);
+    if (best == nullptr || c->LastTick() < best->LastTick()) {
+      best = c;
+    }
+  }
+  if (best != nullptr) {
+    ResumeCoroutine(best, fd == best->timeout_fd_ ? -1 : fd);
   }
 }
 
