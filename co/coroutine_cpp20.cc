@@ -404,9 +404,13 @@ void Scheduler::RemoveWaiter(Coroutine* coroutine, int fd) {
 
 void Scheduler::DetachWaits(Coroutine* coroutine) {
   // Clear the coroutine's wait fds before removing it so that the epoll
-  // registrations are recomputed without them.
+  // registrations are recomputed without them.  Keep a copy for the
+  // readiness re-check in ProcessReadyCoroutines.
   WaitFdList fds = std::move(coroutine->wait_fds_);
   coroutine->wait_fds_.clear();
+  if (!fds.empty()) {
+    coroutine->parked_wait_fds_ = fds;
+  }
   for (const WaitFd& wait_fd : fds) {
     RemoveWaiter(coroutine, wait_fd.fd);
   }
@@ -427,6 +431,8 @@ void Scheduler::WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_f
   DetachWaits(coroutine);
   coroutine->SetLastTick(tick_count_);
   coroutine->SetState(Coroutine::State::kWaiting);
+  coroutine->parked_timeout_ns_ = timeout_ns;
+  coroutine->parked_wait_fds_.assign(fds, fds + num_fds);
 
   coroutine->wait_fds_.assign(fds, fds + num_fds);
   for (size_t i = 0; i < num_fds; i++) {
@@ -650,7 +656,35 @@ void Scheduler::ProcessReadyCoroutines() {
 
     if (!coroutine || coroutine->GetState() != Coroutine::State::kReady) continue;
 
-    coroutine->Resume(coroutine->GetWaitResult());
+    const int value = coroutine->GetWaitResult();
+    // Same-fd multi-waiter safety (matches stackful processed_fds check):
+    // another waiter may have drained the fd since we were made ready.
+    // Re-park instead of resuming into a blocking read.
+    if (value >= 0 && value != coroutine->interrupt_fd_ &&
+        !coroutine->parked_wait_fds_.empty()) {
+      uint32_t mask = 0;
+      for (const WaitFd& w : coroutine->parked_wait_fds_) {
+        if (w.fd == value) {
+          mask |= w.events;
+        }
+      }
+      if (mask != 0) {
+        struct pollfd pfd = {};
+        pfd.fd = value;
+        pfd.events = static_cast<short>(mask);
+        (void)poll(&pfd, 1, 0);
+        if ((pfd.revents & (static_cast<short>(mask) | POLLHUP | POLLERR)) == 0) {
+          WaitFdList again = coroutine->parked_wait_fds_;
+          const uint64_t timeout_ns = coroutine->parked_timeout_ns_;
+          WaitForFds(coroutine, again.data(), again.size(), timeout_ns);
+          continue;
+        }
+      }
+    }
+    coroutine->parked_wait_fds_.clear();
+    coroutine->parked_timeout_ns_ = 0;
+
+    coroutine->Resume(value);
 
     // Without this, a Yield-only coroutine keeps ready_queue_ non-empty and
     // Run() never reaches the blocking ProcessEvents() call — so every

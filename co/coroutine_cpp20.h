@@ -255,6 +255,10 @@ private:
   // The fds (other than the interrupt and timeout fds) passed to the wait the
   // coroutine is suspended in.
   WaitFdList wait_fds_;
+  // Copy of wait_fds_ kept after DetachWaits so a readiness re-check can
+  // re-park the coroutine if another waiter already drained the fd.
+  WaitFdList parked_wait_fds_;
+  uint64_t parked_timeout_ns_ = 0;
   // The fds added by AsyncWaiter::Wait and not yet waited on.
   mutable std::vector<struct pollfd> user_wait_fds_;
   // An exception other than AbortException that escaped the coroutine
