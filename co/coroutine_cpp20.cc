@@ -18,6 +18,7 @@
 #include <signal.h>
 #endif
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,104 @@
 #include <unistd.h>
 
 namespace co20 {
+
+namespace {
+
+const char* StateName(Coroutine::State state) {
+  switch (state) {
+    case Coroutine::State::kNew:
+      return "new";
+    case Coroutine::State::kReady:
+      return "ready";
+    case Coroutine::State::kRunning:
+      return "running";
+    case Coroutine::State::kYielded:
+      return "yielded";
+    case Coroutine::State::kWaiting:
+      return "waiting";
+    case Coroutine::State::kDead:
+      return "dead";
+  }
+  return "unknown";
+}
+
+#if CO_POLL_MODE == CO_POLL_EPOLL
+uint32_t PollToEpollEvents(uint32_t poll_events) {
+  uint32_t events = 0;
+  if (poll_events & POLLIN) events |= EPOLLIN | EPOLLRDHUP;
+  if (poll_events & POLLOUT) events |= EPOLLOUT;
+  return events;
+}
+
+uint32_t EpollToPollEvents(uint32_t epoll_events) {
+  uint32_t events = 0;
+  if (epoll_events & (EPOLLIN | EPOLLRDHUP)) events |= POLLIN;
+  if (epoll_events & EPOLLOUT) events |= POLLOUT;
+  if (epoll_events & EPOLLERR) events |= POLLERR;
+  if (epoll_events & EPOLLHUP) events |= POLLHUP;
+  return events;
+}
+#endif
+
+}  // namespace
+
+int PollFds(const WaitFd* fds, size_t num_fds, std::vector<WaitFd>* ready) {
+  if (num_fds == 0) {
+    return -1;
+  }
+  absl::InlinedVector<struct pollfd, 4> pfds;
+  pfds.reserve(num_fds);
+  for (size_t i = 0; i < num_fds; i++) {
+    struct pollfd pfd = {};
+    pfd.fd = fds[i].fd;
+    pfd.events = static_cast<short>(fds[i].events);
+    pfds.push_back(pfd);
+  }
+  if (poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 0) <= 0) {
+    return -1;
+  }
+  int first = -1;
+  for (size_t i = 0; i < num_fds; i++) {
+    const uint32_t revents =
+        static_cast<uint32_t>(static_cast<unsigned short>(pfds[i].revents));
+    // Errors and hangups make an fd ready whatever was asked for, so that the
+    // caller can see them when it reads or writes.  An invalid fd isn't ready.
+    const uint32_t wanted = fds[i].events | POLLERR | POLLHUP;
+    if ((revents & wanted) == 0) {
+      continue;
+    }
+    if (first == -1) {
+      first = static_cast<int>(i);
+    }
+    if (ready == nullptr) {
+      break;
+    }
+    ready->push_back({fds[i].fd, revents});
+  }
+  return first;
+}
+
+std::string Coroutine::ToString() const {
+  char buffer[256];
+  snprintf(buffer, sizeof(buffer), "Coroutine %d: %s: state: %s", id_, name_.c_str(),
+           StateName(state_));
+  return buffer;
+}
+
+void Coroutine::Show() const { fprintf(stderr, "%s\n", ToString().c_str()); }
+
+uint32_t Coroutine::WaitMaskFor(int fd) const {
+  if (fd == interrupt_fd_ || fd == timeout_fd_) {
+    return POLLIN;
+  }
+  uint32_t mask = 0;
+  for (const WaitFd& wait_fd : wait_fds_) {
+    if (wait_fd.fd == fd) {
+      mask |= wait_fd.events;
+    }
+  }
+  return mask;
+}
 
 Scheduler::Scheduler() {
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -39,6 +138,8 @@ Scheduler::Scheduler() {
   if (pipe(pipes) == 0) {
     fcntl(pipes[0], F_SETFL, O_NONBLOCK);
     fcntl(pipes[1], F_SETFL, O_NONBLOCK);
+    fcntl(pipes[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipes[1], F_SETFD, FD_CLOEXEC);
     interrupt_fd_ = pipes[0];
     interrupt_write_fd_ = pipes[1];
   }
@@ -46,7 +147,7 @@ Scheduler::Scheduler() {
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   if (epoll_fd_ != -1 && interrupt_fd_ != -1) {
-    struct epoll_event ev;
+    struct epoll_event ev = {};
     ev.events = EPOLLIN;
     ev.data.fd = interrupt_fd_;
     epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, interrupt_fd_, &ev);
@@ -55,22 +156,20 @@ Scheduler::Scheduler() {
 }
 
 Scheduler::~Scheduler() {
-  for (int fd : timerfds_) {
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-    auto pt = posix_timers_.find(fd);
-    if (pt != posix_timers_.end()) {
-      struct itimerspec disarm = {};
-      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
-      timer_delete(pt->second.timer_id);
-      close(pt->second.write_fd);
-    }
-#endif
-    close(fd);
+  // Destroy the coroutines first, while the wait tables they are in are still
+  // valid.  Destroying a suspended coroutine runs the destructors of its
+  // locals.
+  while (!coroutines_.empty()) {
+    auto it = coroutines_.begin();
+    DetachWaits(it->first);
+    std::unique_ptr<Coroutine> coroutine = std::move(it->second);
+    coroutines_.erase(it);
   }
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-  posix_timers_.clear();
-#endif
-  timerfds_.clear();
+  ready_queue_.clear();
+
+  for (int fd : std::vector<int>(timerfds_.begin(), timerfds_.end())) {
+    CloseTimer(fd);
+  }
 
   if (interrupt_fd_ != -1) {
     close(interrupt_fd_);
@@ -101,353 +200,215 @@ void Scheduler::TriggerInterrupt() {
 #endif
 }
 
+void Scheduler::MakeReady(Coroutine* coroutine, int value) {
+  coroutine->SetWaitResult(value);
+  if (coroutine->GetState() == Coroutine::State::kReady) {
+    // Already in the ready queue.
+    return;
+  }
+  coroutine->SetState(Coroutine::State::kReady);
+  ready_queue_.push_back(coroutine);
+  TriggerInterrupt();
+}
+
 void Scheduler::ScheduleCoroutine(Coroutine* coroutine) {
   if (!coroutine) return;
-  auto s = coroutine->GetState();
-  if (s == Coroutine::State::kYielded || s == Coroutine::State::kReady) {
-    coroutine->SetState(Coroutine::State::kReady);
-    ready_queue_.push_back(coroutine);
-    TriggerInterrupt();
+  if (coroutine->GetState() == Coroutine::State::kYielded) {
+    MakeReady(coroutine, 0);
   }
 }
 
 int Scheduler::PollFd(int fd, uint32_t event_mask) {
-  if (event_mask >
-      static_cast<uint32_t>(std::numeric_limits<short>::max())) {
-    return -1;
-  }
-  struct pollfd pfd;
-  pfd.fd = fd;
-  pfd.events = static_cast<short>(event_mask);
-  pfd.revents = 0;
-
-  int ret = poll(&pfd, 1, 0);
-  if (ret <= 0) return -1;
-
-  const uint32_t revents =
-      static_cast<uint32_t>(static_cast<unsigned short>(pfd.revents));
-  if (event_mask & POLLIN) {
-    if (revents & (POLLIN | POLLERR)) return fd;
-  } else {
-    if ((revents & event_mask) || (revents & POLLERR)) return fd;
-  }
-  return -1;
+  WaitFd wait_fd{fd, event_mask};
+  return PollFds(&wait_fd, 1) == 0 ? fd : -1;
 }
 
-// Remove a coroutine from all waiting data structures and clean up
-// any scheduler-owned FDs (timerfds). Called when a coroutine finishes.
-void Scheduler::CleanupCoroutine(Coroutine* coroutine) {
-  auto fd_it = coroutine_fds_.find(coroutine);
-  if (fd_it != coroutine_fds_.end()) {
-    int fd = fd_it->second;
-    auto waiting_it = waiting_fds_.find(fd);
-    if (waiting_it != waiting_fds_.end()) {
-      auto& list = waiting_it->second;
-      list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
-      if (list.empty()) {
-        waiting_fds_.erase(waiting_it);
+bool Scheduler::UpdateEpoll(int fd) {
 #if CO_POLL_MODE == CO_POLL_EPOLL
-        if (epoll_fd_ != -1) {
-          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-        }
-#endif
-      }
-    }
-
-    if (timerfds_.count(fd) > 0) {
-#if CO_TIMER_MODE == CO_TIMER_POSIX
-      auto pt = posix_timers_.find(fd);
-      if (pt != posix_timers_.end()) {
-        struct itimerspec disarm = {};
-        timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
-        timer_delete(pt->second.timer_id);
-        close(pt->second.write_fd);
-        posix_timers_.erase(pt);
-      }
-#endif
-      close(fd);
-      timerfds_.erase(fd);
-    }
-
-    coroutine_fds_.erase(fd_it);
-    wait_masks_.erase(coroutine);
+  if (epoll_fd_ == -1) {
+    return true;
   }
-
-  // Also clean up interrupt FD waiting list.
-  int ifd = coroutine->GetInterruptFd();
-  if (ifd != -1) {
-    auto ifd_it = waiting_fds_.find(ifd);
-    if (ifd_it != waiting_fds_.end()) {
-      auto& ifd_list = ifd_it->second;
-      ifd_list.erase(std::remove(ifd_list.begin(), ifd_list.end(), coroutine),
-                     ifd_list.end());
-      if (ifd_list.empty()) {
-        waiting_fds_.erase(ifd_it);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-        if (epoll_fd_ != -1) {
-          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ifd, nullptr);
-        }
-#endif
-      }
+  uint32_t wanted = 0;
+  auto waiters = waiting_fds_.find(fd);
+  if (waiters != waiting_fds_.end()) {
+    for (Coroutine* c : waiters->second) {
+      wanted |= c->WaitMaskFor(fd);
     }
   }
-
-  CleanupTimeoutFd(coroutine);
+  const uint32_t events = PollToEpollEvents(wanted);
+  auto registered = epoll_events_.find(fd);
+  if (events == 0) {
+    if (registered != epoll_events_.end()) {
+      epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+      epoll_events_.erase(registered);
+    }
+    return true;
+  }
+  if (registered != epoll_events_.end() && registered->second == events) {
+    return true;
+  }
+  struct epoll_event ev = {};
+  ev.events = events;
+  ev.data.fd = fd;
+  const int op = registered == epoll_events_.end() ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+  if (epoll_ctl(epoll_fd_, op, fd, &ev) == -1) {
+    // EEXIST: registered outside this table.  ENOENT: the kernel dropped the
+    // registration when the fd was closed and the number was reused.
+    const int retry_op = op == EPOLL_CTL_ADD ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+    const bool retry = (op == EPOLL_CTL_ADD && errno == EEXIST) ||
+                       (op == EPOLL_CTL_MOD && errno == ENOENT);
+    if (!retry || epoll_ctl(epoll_fd_, retry_op, fd, &ev) == -1) {
+      if (registered != epoll_events_.end()) {
+        epoll_events_.erase(registered);
+      }
+      return false;
+    }
+  }
+  epoll_events_[fd] = events;
+#else
+  (void)fd;
+#endif
+  return true;
 }
 
-void Scheduler::WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask,
-                           uint64_t timeout_ns) {
-  if (!coroutine) return;
+bool Scheduler::AddWaiter(Coroutine* coroutine, int fd) {
+  auto& waiters = waiting_fds_[fd];
+  if (std::find(waiters.begin(), waiters.end(), coroutine) == waiters.end()) {
+    waiters.push_back(coroutine);
+  }
+  if (UpdateEpoll(fd)) {
+    return true;
+  }
+  const int saved_errno = errno;
+  RemoveWaiter(coroutine, fd);
+  errno = saved_errno;
+  return false;
+}
 
-  // If already ready, schedule immediately.
-  if (PollFd(fd, event_mask) == fd) {
-    coroutine->SetWaitResult(fd);
-    coroutine->SetState(Coroutine::State::kReady);
-    ready_queue_.push_back(coroutine);
-    TriggerInterrupt();
+void Scheduler::RemoveWaiter(Coroutine* coroutine, int fd) {
+  auto it = waiting_fds_.find(fd);
+  if (it == waiting_fds_.end()) {
     return;
   }
+  auto& waiters = it->second;
+  waiters.erase(std::remove(waiters.begin(), waiters.end(), coroutine), waiters.end());
+  if (waiters.empty()) {
+    waiting_fds_.erase(it);
+  }
+  UpdateEpoll(fd);
+}
 
+void Scheduler::DetachWaits(Coroutine* coroutine) {
+  // Clear the coroutine's wait fds before removing it so that the epoll
+  // registrations are recomputed without them.
+  WaitFdList fds = std::move(coroutine->wait_fds_);
+  coroutine->wait_fds_.clear();
+  for (const WaitFd& wait_fd : fds) {
+    RemoveWaiter(coroutine, wait_fd.fd);
+  }
+  if (coroutine->interrupt_fd_ != -1) {
+    RemoveWaiter(coroutine, coroutine->interrupt_fd_);
+  }
+  const int timeout_fd = coroutine->timeout_fd_;
+  if (timeout_fd != -1) {
+    coroutine->timeout_fd_ = -1;
+    RemoveWaiter(coroutine, timeout_fd);
+    CloseTimer(timeout_fd);
+  }
+}
+
+void Scheduler::WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_fds,
+                           uint64_t timeout_ns) {
+  if (!coroutine) return;
+  DetachWaits(coroutine);
   coroutine->SetState(Coroutine::State::kWaiting);
 
-  // If this coroutine was already waiting on a different FD, detach it first.
-  auto existing_it = coroutine_fds_.find(coroutine);
-  if (existing_it != coroutine_fds_.end()) {
-    int old_fd = existing_it->second;
-    if (old_fd != fd) {
-      auto old_fd_it = waiting_fds_.find(old_fd);
-      if (old_fd_it != waiting_fds_.end()) {
-        auto& old_list = old_fd_it->second;
-        old_list.erase(std::remove(old_list.begin(), old_list.end(), coroutine),
-                       old_list.end());
-        if (old_list.empty()) {
-          waiting_fds_.erase(old_fd_it);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-          if (epoll_fd_ != -1) {
-            epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, old_fd, nullptr);
-          }
-#endif
-        }
-      }
-      existing_it->second = fd;
-    }
-    // else: same FD, fall through to add to waiting list
-  } else {
-    coroutine_fds_[coroutine] = fd;
-  }
-
-  wait_masks_[coroutine] = event_mask;
-
-  // Add coroutine to waiting list for this FD.
-  [[maybe_unused]] bool fd_already_tracked = waiting_fds_.count(fd) > 0;
-  auto& wait_list = waiting_fds_[fd];
-  if (std::find(wait_list.begin(), wait_list.end(), coroutine) == wait_list.end()) {
-    wait_list.push_back(coroutine);
-  }
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  if (epoll_fd_ != -1) {
-    struct epoll_event ev;
-    ev.data.fd = fd;
-    ev.events = 0;
-    if (event_mask & POLLIN) ev.events |= EPOLLIN | EPOLLRDHUP;
-    if (event_mask & POLLOUT) ev.events |= EPOLLOUT;
-
-    if (fd_already_tracked) {
-      epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
-    } else {
-      int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev);
-      if (ret == -1 && errno == EEXIST) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, fd, &ev);
-      } else if (ret == -1 && errno == EBADF) {
-        wait_list.erase(std::remove(wait_list.begin(), wait_list.end(), coroutine),
-                        wait_list.end());
-        if (wait_list.empty()) waiting_fds_.erase(fd);
-        coroutine_fds_.erase(coroutine);
-        wait_masks_.erase(coroutine);
-        coroutine->SetWaitResult(-1);
-        coroutine->SetState(Coroutine::State::kReady);
-        ready_queue_.push_back(coroutine);
-        TriggerInterrupt();
-        return;
-      }
+  coroutine->wait_fds_.assign(fds, fds + num_fds);
+  for (size_t i = 0; i < num_fds; i++) {
+    if (!AddWaiter(coroutine, fds[i].fd)) {
+      // epoll refuses regular files (EPERM), which are always ready, and
+      // closed fds (EBADF), which never will be.
+      const int fd = fds[i].fd;
+      const int result = errno == EPERM ? fd : -1;
+      DetachWaits(coroutine);
+      MakeReady(coroutine, result);
+      return;
     }
   }
-#endif
 
-  // Also register the coroutine's interrupt FD if present.
-  int ifd = coroutine->GetInterruptFd();
-  if (ifd != -1) {
-    [[maybe_unused]] bool ifd_already_tracked = waiting_fds_.count(ifd) > 0;
-    auto& ifd_list = waiting_fds_[ifd];
-    if (std::find(ifd_list.begin(), ifd_list.end(), coroutine) == ifd_list.end()) {
-      ifd_list.push_back(coroutine);
-    }
-#if CO_POLL_MODE == CO_POLL_EPOLL
-    if (epoll_fd_ != -1) {
-      struct epoll_event ev;
-      ev.data.fd = ifd;
-      ev.events = EPOLLIN;
-      if (ifd_already_tracked) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, ifd, &ev);
-      } else {
-        int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, ifd, &ev);
-        if (ret == -1 && errno == EEXIST) {
-          epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, ifd, &ev);
-        }
-      }
-    }
-#endif
+  if (coroutine->interrupt_fd_ != -1) {
+    AddWaiter(coroutine, coroutine->interrupt_fd_);
   }
 
-  // Set up timeout timer if requested.
   if (timeout_ns > 0) {
-#if CO_TIMER_MODE == CO_TIMER_TIMERFD
-    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (tfd != -1) {
-      struct itimerspec its = {};
-      its.it_value.tv_sec = timeout_ns / 1000000000ULL;
-      its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
-      timerfd_settime(tfd, 0, &its, nullptr);
-
-      timerfds_.insert(tfd);
-      coroutine->SetTimeoutFd(tfd);
-
-      auto& timer_wait_list = waiting_fds_[tfd];
-      timer_wait_list.push_back(coroutine);
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-      if (epoll_fd_ != -1) {
-        struct epoll_event tev;
-        tev.data.fd = tfd;
-        tev.events = EPOLLIN;
-        int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, tfd, &tev);
-        if (ret == -1 && errno == EEXIST) {
-          epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, tfd, &tev);
-        }
-      }
-#endif
+    const int tfd = CreateTimer(timeout_ns);
+    if (tfd == -1) {
+      // Without a timer the wait would never time out.  Report the timeout
+      // now instead.
+      DetachWaits(coroutine);
+      MakeReady(coroutine, -1);
+      return;
     }
-
-#elif CO_TIMER_MODE == CO_TIMER_EVENT
-    int kq = kqueue();
-    if (kq != -1) {
-      timerfds_.insert(kq);
-      coroutine->SetTimeoutFd(kq);
-
-      struct kevent kev;
-      EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS,
-             timeout_ns, 0);
-      kevent(kq, &kev, 1, nullptr, 0, nullptr);
-
-      auto& timer_wait_list = waiting_fds_[kq];
-      timer_wait_list.push_back(coroutine);
-    }
-
-#elif CO_TIMER_MODE == CO_TIMER_POSIX
-    int pipe_fds[2];
-    if (pipe(pipe_fds) == 0) {
-      int read_fd = pipe_fds[0];
-      int write_fd = pipe_fds[1];
-      fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL, 0) | O_NONBLOCK);
-      fcntl(write_fd, F_SETFL, fcntl(write_fd, F_GETFL, 0) | O_NONBLOCK);
-
-      struct sigevent se = {};
-      se.sigev_notify = SIGEV_THREAD;
-      se.sigev_notify_attributes = nullptr;
-      se.sigev_value.sival_int = write_fd;
-      se.sigev_notify_function = [](union sigval sv) {
-        char c = 1;
-        (void)write(sv.sival_int, &c, 1);
-      };
-
-      timer_t timer_id;
-      if (timer_create(CLOCK_REALTIME, &se, &timer_id) == 0) {
-        struct itimerspec its = {};
-        its.it_value.tv_sec = timeout_ns / 1000000000ULL;
-        its.it_value.tv_nsec = timeout_ns % 1000000000ULL;
-        if (timer_settime(timer_id, 0, &its, nullptr) == 0) {
-          timerfds_.insert(read_fd);
-          posix_timers_[read_fd] = {timer_id, write_fd};
-          coroutine->SetTimeoutFd(read_fd);
-
-          auto& timer_wait_list = waiting_fds_[read_fd];
-          timer_wait_list.push_back(coroutine);
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-          if (epoll_fd_ != -1) {
-            struct epoll_event tev;
-            tev.data.fd = read_fd;
-            tev.events = EPOLLIN;
-            int ret = epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, read_fd, &tev);
-            if (ret == -1 && errno == EEXIST) {
-              epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, read_fd, &tev);
-            }
-          }
-#endif
-        } else {
-          timer_delete(timer_id);
-          close(read_fd);
-          close(write_fd);
-        }
-      } else {
-        close(read_fd);
-        close(write_fd);
-      }
-    }
-#endif
+    coroutine->timeout_fd_ = tfd;
+    AddWaiter(coroutine, tfd);
   }
 }
 
 void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
-  if (!coroutine || nanoseconds == 0) {
+  if (!coroutine) return;
+  if (nanoseconds == 0) {
+    coroutine->SetState(Coroutine::State::kYielded);
     ScheduleCoroutine(coroutine);
     return;
   }
+  // A sleep is a wait for nothing but the timeout.
+  WaitForFds(coroutine, nullptr, 0, nanoseconds);
+}
+
+int Scheduler::CreateTimer(uint64_t nanoseconds) {
+  struct itimerspec its = {};
+  its.it_value.tv_sec = static_cast<time_t>(nanoseconds / 1000000000ULL);
+  its.it_value.tv_nsec = static_cast<long>(nanoseconds % 1000000000ULL);
 
 #if CO_TIMER_MODE == CO_TIMER_TIMERFD
-  int timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-  if (timer_fd == -1) {
-    ScheduleCoroutine(coroutine);
-    return;
+  int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+  if (tfd == -1) {
+    return -1;
   }
-
-  timerfds_.insert(timer_fd);
-
-  struct itimerspec its = {};
-  its.it_value.tv_sec = nanoseconds / 1000000000ULL;
-  its.it_value.tv_nsec = nanoseconds % 1000000000ULL;
-  timerfd_settime(timer_fd, 0, &its, nullptr);
-
-  WaitForFd(coroutine, timer_fd, POLLIN, 0);
+  if (timerfd_settime(tfd, 0, &its, nullptr) == -1) {
+    close(tfd);
+    return -1;
+  }
+  timerfds_.insert(tfd);
+  return tfd;
 
 #elif CO_TIMER_MODE == CO_TIMER_EVENT
   int kq = kqueue();
   if (kq == -1) {
-    ScheduleCoroutine(coroutine);
-    return;
+    return -1;
   }
-
+  fcntl(kq, F_SETFD, FD_CLOEXEC);
+  struct kevent kev;
+  EV_SET(&kev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS,
+         static_cast<intptr_t>(nanoseconds), 0);
+  if (kevent(kq, &kev, 1, nullptr, 0, nullptr) == -1) {
+    close(kq);
+    return -1;
+  }
   timerfds_.insert(kq);
-
-  struct kevent ev;
-  EV_SET(&ev, 1, EVFILT_TIMER, EV_ADD | EV_ONESHOT, NOTE_NSECONDS, nanoseconds, 0);
-  kevent(kq, &ev, 1, nullptr, 0, nullptr);
-
-  WaitForFd(coroutine, kq, POLLIN, 0);
+  return kq;
 
 #elif CO_TIMER_MODE == CO_TIMER_POSIX
   int pipe_fds[2];
   if (pipe(pipe_fds) == -1) {
-    ScheduleCoroutine(coroutine);
-    return;
+    return -1;
   }
-
   int read_fd = pipe_fds[0];
   int write_fd = pipe_fds[1];
-
-  fcntl(read_fd, F_SETFL, fcntl(read_fd, F_GETFL, 0) | O_NONBLOCK);
-  fcntl(write_fd, F_SETFL, fcntl(write_fd, F_GETFL, 0) | O_NONBLOCK);
+  for (int fd : {read_fd, write_fd}) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  }
 
   struct sigevent se = {};
   se.sigev_notify = SIGEV_THREAD;
@@ -462,178 +423,88 @@ void Scheduler::SleepFor(Coroutine* coroutine, uint64_t nanoseconds) {
   if (timer_create(CLOCK_REALTIME, &se, &timer_id) == -1) {
     close(read_fd);
     close(write_fd);
-    ScheduleCoroutine(coroutine);
-    return;
+    return -1;
   }
-
-  struct itimerspec its = {};
-  its.it_value.tv_sec = nanoseconds / 1000000000ULL;
-  its.it_value.tv_nsec = nanoseconds % 1000000000ULL;
-
   if (timer_settime(timer_id, 0, &its, nullptr) == -1) {
     timer_delete(timer_id);
     close(read_fd);
     close(write_fd);
-    ScheduleCoroutine(coroutine);
-    return;
+    return -1;
   }
-
   timerfds_.insert(read_fd);
   posix_timers_[read_fd] = {timer_id, write_fd};
-
-  WaitForFd(coroutine, read_fd, POLLIN, 0);
+  return read_fd;
 #endif
+}
+
+void Scheduler::CloseTimer(int fd) {
+  if (timerfds_.erase(fd) == 0) {
+    return;
+  }
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  auto pt = posix_timers_.find(fd);
+  if (pt != posix_timers_.end()) {
+    struct itimerspec disarm = {};
+    timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
+    timer_delete(pt->second.timer_id);
+    close(pt->second.write_fd);
+    posix_timers_.erase(pt);
+  }
+#endif
+  close(fd);
 }
 
 void Scheduler::ResumeCoroutine(Coroutine* coroutine, int value) {
-  if (!coroutine || coroutine->handle_.done()) return;
-
-  // Detach from waiting state.
-  auto it = coroutine_fds_.find(coroutine);
-  if (it != coroutine_fds_.end()) {
-    int fd = it->second;
-
-    auto fd_it = waiting_fds_.find(fd);
-    if (fd_it != waiting_fds_.end()) {
-      auto& list = fd_it->second;
-      list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
-    }
-
-    // Clean up scheduler-owned timer FDs.
-    bool is_timer = fd != interrupt_fd_ && timerfds_.count(fd) > 0;
-    if (is_timer) {
-#if CO_TIMER_MODE == CO_TIMER_TIMERFD
-      uint64_t val;
-      (void)read(fd, &val, sizeof(val));
-#elif CO_TIMER_MODE == CO_TIMER_POSIX
-      auto pt = posix_timers_.find(fd);
-      if (pt != posix_timers_.end()) {
-        struct itimerspec disarm = {};
-        timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
-        timer_delete(pt->second.timer_id);
-        close(pt->second.write_fd);
-        posix_timers_.erase(pt);
-      }
-#endif
-      close(fd);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-      if (epoll_fd_ != -1) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-      }
-#endif
-      timerfds_.erase(fd);
-    }
-
-    if (fd_it != waiting_fds_.end() && fd_it->second.empty()) {
-      waiting_fds_.erase(fd_it);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-      if (!is_timer && epoll_fd_ != -1) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-      }
-#endif
-    }
-    coroutine_fds_.erase(it);
-    wait_masks_.erase(coroutine);
-  }
-
-  // Also detach from interrupt FD waiting list if present.
-  int ifd = coroutine->GetInterruptFd();
-  if (ifd != -1) {
-    auto ifd_it = waiting_fds_.find(ifd);
-    if (ifd_it != waiting_fds_.end()) {
-      auto& ifd_list = ifd_it->second;
-      ifd_list.erase(std::remove(ifd_list.begin(), ifd_list.end(), coroutine),
-                     ifd_list.end());
-      if (ifd_list.empty()) {
-        waiting_fds_.erase(ifd_it);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-        if (epoll_fd_ != -1) {
-          epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, ifd, nullptr);
-        }
-#endif
-      }
-    }
-  }
-
-  // Clean up timeout timer fd if present.
-  CleanupTimeoutFd(coroutine);
-
-  coroutine->SetWaitResult(value);
-  coroutine->SetState(Coroutine::State::kReady);
-  ready_queue_.push_back(coroutine);
-  TriggerInterrupt();
+  if (!coroutine || coroutine->GetState() != Coroutine::State::kWaiting) return;
+  DetachWaits(coroutine);
+  MakeReady(coroutine, value);
 }
 
-void Scheduler::CleanupTimeoutFd(Coroutine* coroutine) {
-  int tfd = coroutine->GetTimeoutFd();
-  if (tfd == -1) return;
-
-  auto tfd_it = waiting_fds_.find(tfd);
-  if (tfd_it != waiting_fds_.end()) {
-    auto& list = tfd_it->second;
-    list.erase(std::remove(list.begin(), list.end(), coroutine), list.end());
-    if (list.empty()) {
-      waiting_fds_.erase(tfd_it);
-#if CO_POLL_MODE == CO_POLL_EPOLL
-      if (epoll_fd_ != -1) {
-        epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, tfd, nullptr);
-      }
-#endif
-    }
+void Scheduler::DispatchFdEvents(int fd, uint32_t revents) {
+  auto it = waiting_fds_.find(fd);
+  if (it == waiting_fds_.end()) {
+    return;
   }
-
-  if (timerfds_.count(tfd) > 0) {
-#if CO_TIMER_MODE == CO_TIMER_TIMERFD
-    uint64_t val;
-    (void)read(tfd, &val, sizeof(val));
-#elif CO_TIMER_MODE == CO_TIMER_POSIX
-    auto pt = posix_timers_.find(tfd);
-    if (pt != posix_timers_.end()) {
-      struct itimerspec disarm = {};
-      timer_settime(pt->second.timer_id, 0, &disarm, nullptr);
-      timer_delete(pt->second.timer_id);
-      close(pt->second.write_fd);
-      posix_timers_.erase(pt);
-    }
-#endif
-    close(tfd);
-    timerfds_.erase(tfd);
-  }
-
-  coroutine->SetTimeoutFd(-1);
-}
-
-#if CO_POLL_MODE == CO_POLL_EPOLL
-void Scheduler::DispatchEpollEvents(struct epoll_event* events, int count) {
-  for (int i = 0; i < count; i++) {
-    int fd = events[i].data.fd;
-    if (fd == interrupt_fd_) {
-      uint64_t val;
-      (void)read(interrupt_fd_, &val, sizeof(val));
+  // Waking a coroutine removes it from the list, so iterate over a copy.
+  const std::vector<Coroutine*> waiters = it->second;
+  for (Coroutine* c : waiters) {
+    // Errors and hangups wake every waiter.  Anything else wakes only the
+    // waiters that asked for one of the events that is ready.
+    if ((revents & (c->WaitMaskFor(fd) | POLLHUP | POLLERR)) == 0) {
       continue;
     }
-    auto it = waiting_fds_.find(fd);
-    if (it != waiting_fds_.end()) {
-      std::vector<Coroutine*> to_resume = it->second;
-      for (Coroutine* c : to_resume) {
-        ResumeCoroutine(c, fd);
-      }
-    }
+    // A timeout makes the wait return -1.
+    ResumeCoroutine(c, fd == c->timeout_fd_ ? -1 : fd);
   }
 }
-#endif
+
+void Scheduler::FinishCoroutine(Coroutine* coroutine) {
+  coroutine->SetState(Coroutine::State::kDead);
+  DetachWaits(coroutine);
+  ready_queue_.erase(std::remove(ready_queue_.begin(), ready_queue_.end(), coroutine),
+                     ready_queue_.end());
+  if (completion_callback_) {
+    completion_callback_(coroutine);
+  }
+  std::exception_ptr exception = std::move(coroutine->exception_);
+  auto it = coroutines_.find(coroutine);
+  if (it != coroutines_.end()) {
+    // Move it out before destroying it so that the coroutine's destructors
+    // can spawn coroutines.
+    std::unique_ptr<Coroutine> owned = std::move(it->second);
+    coroutines_.erase(it);
+  }
+  if (exception) {
+    std::rethrow_exception(exception);
+  }
+}
 
 void Scheduler::ProcessReadyCoroutines() {
-  while (!ready_queue_.empty()) {
+  while (!ready_queue_.empty() && !stop_requested_) {
     Coroutine* coroutine = ready_queue_.front();
     ready_queue_.pop_front();
 
-    if (!coroutine) continue;
-    if (coroutine->handle_.done()) {
-      coroutine->SetState(Coroutine::State::kDead);
-      continue;
-    }
-    if (coroutine->GetState() != Coroutine::State::kReady) continue;
+    if (!coroutine || coroutine->GetState() != Coroutine::State::kReady) continue;
 
     coroutine->Resume(coroutine->GetWaitResult());
 
@@ -641,14 +512,22 @@ void Scheduler::ProcessReadyCoroutines() {
     if (epoll_fd_ != -1 && !waiting_fds_.empty()) {
       struct epoll_event events[64];
       int n = epoll_wait(epoll_fd_, events, 64, 0);
-      if (n > 0) DispatchEpollEvents(events, n);
+      for (int i = 0; i < n; i++) {
+        if (events[i].data.fd == interrupt_fd_) {
+          uint64_t val;
+          (void)read(interrupt_fd_, &val, sizeof(val));
+          continue;
+        }
+        DispatchFdEvents(events[i].data.fd, EpollToPollEvents(events[i].events));
+      }
     }
 #endif
 
-    if (coroutine->handle_.done() ||
+    // A coroutine that is still running suspended in an awaitable that isn't
+    // ours; nothing will resume it.
+    if (coroutine->root_.done() || coroutine->GetState() == Coroutine::State::kDead ||
         coroutine->GetState() == Coroutine::State::kRunning) {
-      coroutine->SetState(Coroutine::State::kDead);
-      CleanupCoroutine(coroutine);
+      FinishCoroutine(coroutine);
     }
   }
 }
@@ -659,57 +538,45 @@ void Scheduler::ProcessEvents() {
 #if CO_POLL_MODE == CO_POLL_EPOLL
   if (epoll_fd_ != -1) {
     struct epoll_event events[64];
-    // Non-blocking check first.
-    int n = epoll_wait(epoll_fd_, events, 64, 0);
-    if (n <= 0) {
-      if (waiting_fds_.empty()) return;
-      n = epoll_wait(epoll_fd_, events, 64, -1);
-      if (n <= 0) return;
+    int n = epoll_wait(epoll_fd_, events, 64, -1);
+    for (int i = 0; i < n; i++) {
+      if (events[i].data.fd == interrupt_fd_) {
+        uint64_t val;
+        (void)read(interrupt_fd_, &val, sizeof(val));
+        continue;
+      }
+      DispatchFdEvents(events[i].data.fd, EpollToPollEvents(events[i].events));
     }
-    DispatchEpollEvents(events, n);
     return;
   }
 #endif
 
-  // poll() fallback
+  // poll() fallback.  Poll only for what the waiters asked for.  A socketpair
+  // is always writable, so polling for POLLOUT on behalf of a POLLIN waiter
+  // would report it ready on every pass.
   std::vector<struct pollfd> pfds;
-  std::vector<std::vector<Coroutine*>> coroutines_per_fd;
-
-  for (auto& [fd, coroutine_list] : waiting_fds_) {
-    // Poll only for what the waiters asked for.  A socketpair is always
-    // writable, so polling for POLLOUT on behalf of a POLLIN waiter would
-    // report it ready on every pass.
+  for (auto& [fd, waiters] : waiting_fds_) {
     uint32_t mask = 0;
-    for (Coroutine* c : coroutine_list) {
-      mask |= WaitMaskFor(c, fd);
+    for (Coroutine* c : waiters) {
+      mask |= c->WaitMaskFor(fd);
     }
-    struct pollfd pfd;
+    struct pollfd pfd = {};
     pfd.fd = fd;
     pfd.events = static_cast<short>(mask);
-    pfd.revents = 0;
     pfds.push_back(pfd);
-    coroutines_per_fd.push_back(coroutine_list);
   }
 
-  struct pollfd interrupt_pfd;
+  struct pollfd interrupt_pfd = {};
   interrupt_pfd.fd = interrupt_fd_;
   interrupt_pfd.events = POLLIN;
-  interrupt_pfd.revents = 0;
   pfds.push_back(interrupt_pfd);
 
-  if (pfds.size() >
-      static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
+  if (pfds.size() > static_cast<size_t>(std::numeric_limits<nfds_t>::max())) {
     return;
   }
-  const nfds_t nfds = static_cast<nfds_t>(pfds.size());
-  int ret = poll(pfds.data(), nfds, 0);
-  if (ret <= 0) {
-    if (waiting_fds_.empty()) return;
-    ret = poll(pfds.data(), nfds, -1);
-    if (ret <= 0) return;
-  }
+  int ret = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), -1);
+  if (ret <= 0) return;
 
-  // Drain interrupt fd.
   if (pfds.back().revents & POLLIN) {
 #if defined(__linux__)
     uint64_t val;
@@ -719,45 +586,83 @@ void Scheduler::ProcessEvents() {
     (void)read(interrupt_fd_, &val, 1);
 #endif
   }
+  pfds.pop_back();
 
-  for (size_t i = 0; i < coroutines_per_fd.size(); i++) {
-    const int fd = pfds[i].fd;
-    const short revents = pfds[i].revents;
-    if (revents == 0) continue;
-    // Errors and hangups wake every waiter.  Anything else wakes only the
-    // waiters that asked for one of the events that is ready.
-    std::vector<Coroutine*> to_resume = coroutines_per_fd[i];
-    for (Coroutine* c : to_resume) {
-      if (revents & (WaitMaskFor(c, fd) | POLLHUP | POLLERR)) {
-        ResumeCoroutine(c, fd);
-      }
+  for (const struct pollfd& pfd : pfds) {
+    if (pfd.revents != 0) {
+      DispatchFdEvents(pfd.fd,
+                       static_cast<uint32_t>(static_cast<unsigned short>(pfd.revents)));
     }
   }
 }
 
-uint32_t Scheduler::WaitMaskFor(Coroutine* coroutine, int fd) const {
-  auto fd_it = coroutine_fds_.find(coroutine);
-  if (fd_it == coroutine_fds_.end() || fd_it->second != fd) {
-    return POLLIN;
-  }
-  auto mask_it = wait_masks_.find(coroutine);
-  return mask_it == wait_masks_.end() ? POLLIN : mask_it->second;
-}
-
 void Scheduler::Run() {
   running_ = true;
+  struct ResetOnExit {
+    Scheduler* s;
+    ~ResetOnExit() {
+      s->running_ = false;
+      s->stop_requested_ = false;
+    }
+  } reset{this};
 
-  while (running_) {
+  while (!stop_requested_) {
     ProcessReadyCoroutines();
-
-    if (waiting_fds_.empty() && ready_queue_.empty()) break;
+    if (stop_requested_) break;
     if (!ready_queue_.empty()) continue;
     if (waiting_fds_.empty()) break;
-
     ProcessEvents();
   }
+}
 
-  running_ = false;
+void Scheduler::Show() const {
+  for (const std::string& s : AllCoroutineStrings()) {
+    fprintf(stderr, "%s\n", s.c_str());
+  }
+}
+
+std::vector<std::string> Scheduler::AllCoroutineStrings() const {
+  std::vector<const Coroutine*> sorted;
+  sorted.reserve(coroutines_.size());
+  for (const auto& [ptr, owned] : coroutines_) {
+    sorted.push_back(ptr);
+  }
+  std::sort(sorted.begin(), sorted.end(),
+            [](const Coroutine* a, const Coroutine* b) { return a->Id() < b->Id(); });
+  std::vector<std::string> strings;
+  strings.reserve(sorted.size());
+  for (const Coroutine* c : sorted) {
+    strings.push_back(c->ToString());
+  }
+  return strings;
+}
+
+std::vector<int> Scheduler::GetAllFds() const {
+  std::vector<int> fds;
+#if CO_POLL_MODE == CO_POLL_EPOLL
+  if (epoll_fd_ != -1) fds.push_back(epoll_fd_);
+#endif
+  if (interrupt_fd_ != -1) fds.push_back(interrupt_fd_);
+#if !defined(__linux__)
+  if (interrupt_write_fd_ != -1) fds.push_back(interrupt_write_fd_);
+#endif
+#if CO_TIMER_MODE == CO_TIMER_POSIX
+  for (const auto& [fd, info] : posix_timers_) {
+    fds.push_back(info.write_fd);
+  }
+#endif
+  for (const auto& [fd, waiters] : waiting_fds_) {
+    fds.push_back(fd);
+  }
+  for (int fd : timerfds_) {
+    if (waiting_fds_.find(fd) == waiting_fds_.end()) fds.push_back(fd);
+  }
+  for (const auto& [ptr, owned] : coroutines_) {
+    if (ptr->interrupt_fd_ != -1 && waiting_fds_.find(ptr->interrupt_fd_) == waiting_fds_.end()) {
+      fds.push_back(ptr->interrupt_fd_);
+    }
+  }
+  return fds;
 }
 
 thread_local Coroutine* self = nullptr;

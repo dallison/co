@@ -65,15 +65,19 @@
 #include <cstring>
 #include <deque>
 #include <errno.h>
+#include <exception>
 #include <fcntl.h>
 #include <functional>
+#include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <sys/poll.h>
 #include <type_traits>
 #include <unistd.h>
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include <vector>
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
@@ -94,15 +98,29 @@ namespace co20 {
 class Coroutine;
 class Scheduler;
 
+// Thrown at the next co_await of a coroutine that has been aborted.  A
+// coroutine that lets it escape simply finishes.
 struct AbortException {};
+
+// A file descriptor and the poll events (POLLIN, POLLOUT) to wait for.  When
+// returned by WaitAll, events holds the events that are ready.
+struct WaitFd {
+  int fd = -1;
+  uint32_t events = POLLIN;
+};
+
+using WaitFdList = absl::InlinedVector<WaitFd, 4>;
 
 struct BaseAwaitable;
 struct YieldAwaitable;
 struct WaitAwaitable;
+struct WaitAllAwaitable;
 struct SleepAwaitable;
+struct Task;
 template <typename T> struct ValueTask;
 
-// Represents a single C++20 stackless coroutine managed by a Scheduler.
+// Represents a single C++20 stackless coroutine managed by a Scheduler.  The
+// scheduler owns it and destroys it when its function finishes.
 class Coroutine {
 public:
   enum class State {
@@ -118,6 +136,7 @@ public:
   friend struct BaseAwaitable;
   friend struct YieldAwaitable;
   friend struct WaitAwaitable;
+  friend struct WaitAllAwaitable;
   friend struct SleepAwaitable;
   friend struct Task;
   template <typename T> friend struct ValueTask;
@@ -126,14 +145,7 @@ public:
   Coroutine(Scheduler& scheduler, Func&& func, const std::string& name = "",
             int interrupt_fd = -1);
 
-  ~Coroutine() {
-    if (interrupt_fd_ != -1) {
-      close(interrupt_fd_);
-    }
-    if (handle_) {
-      handle_.destroy();
-    }
-  }
+  ~Coroutine();
 
   Coroutine(const Coroutine&) = delete;
   Coroutine& operator=(const Coroutine&) = delete;
@@ -141,30 +153,58 @@ public:
   Coroutine& operator=(Coroutine&&) = delete;
 
   YieldAwaitable Yield();
+
+  // Wait for one of a set of fds to become ready.  The result is the fd that
+  // is ready, the coroutine's interrupt fd if that was triggered, or -1 if
+  // timeout_ns (when non-zero) expired first.
   WaitAwaitable Wait(int fd, uint32_t event_mask = POLLIN, uint64_t timeout_ns = 0);
+  WaitAwaitable Wait(std::initializer_list<int> fds, uint32_t event_mask = POLLIN,
+                     uint64_t timeout_ns = 0);
+  WaitAwaitable Wait(const std::vector<int>& fds, uint32_t event_mask = POLLIN,
+                     uint64_t timeout_ns = 0);
+  WaitAwaitable Wait(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0);
+
+  // Wait for at least one of a set of fds to become ready and return all of
+  // the ones that are ready, with WaitFd::events set to the ready events.  The
+  // result is empty on timeout or interrupt.
+  WaitAllAwaitable WaitAll(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0);
+
   SleepAwaitable Sleep(uint64_t nanoseconds);
 
   template <typename Rep, typename Period>
   SleepAwaitable Sleep(std::chrono::duration<Rep, Period> duration);
 
+  // Make the coroutine throw AbortException at its current or next co_await.
   void Abort();
 
   bool IsAborted() const { return abort_pending_; }
   const std::string& Name() const { return name_; }
+  void SetName(const std::string& name) { name_ = name; }
+  int Id() const { return id_; }
   State GetState() const { return state_; }
   Scheduler& GetScheduler() const { return scheduler_; }
   int GetInterruptFd() const { return interrupt_fd_; }
+
+  // A one-line description of the coroutine for debugging.
+  std::string ToString() const;
+  void Show() const;
 
 private:
   void SetHandle(std::coroutine_handle<> handle) { handle_ = handle; }
   void SetState(State state) { state_ = state; }
   void SetWaitResult(int result) { wait_result_ = result; }
   int GetWaitResult() const { return wait_result_; }
-  void SetTimeoutFd(int fd) { timeout_fd_ = fd; }
-  int GetTimeoutFd() const { return timeout_fd_; }
+
+  // The poll events this coroutine is waiting for on fd, or 0 if it isn't
+  // waiting on it.
+  uint32_t WaitMaskFor(int fd) const;
 
   inline void Resume(int value = 0);
 
+  // The frame of the coroutine function.  Destroying it destroys the frames
+  // of any ValueTasks it is suspended in.
+  std::coroutine_handle<> root_;
+  // The innermost frame, where the coroutine resumes.
   std::coroutine_handle<> handle_;
   Scheduler& scheduler_;
   State state_ = State::kNew;
@@ -174,6 +214,12 @@ private:
   int wait_result_ = -1;
   int interrupt_fd_ = -1;
   int timeout_fd_ = -1;
+  // The fds (other than the interrupt and timeout fds) passed to the wait the
+  // coroutine is suspended in.
+  WaitFdList wait_fds_;
+  // An exception other than AbortException that escaped the coroutine
+  // function.  Scheduler::Run rethrows it.
+  std::exception_ptr exception_;
   // Holds the callable (e.g. lambda) that produced the coroutine, keeping
   // its captures alive for the lifetime of the coroutine frame.
   std::shared_ptr<void> callable_storage_;
@@ -183,11 +229,27 @@ private:
 // epoll (Linux) or poll as the I/O readiness backend.
 class Scheduler {
 public:
+  using CompletionCallback = std::function<void(Coroutine*)>;
+
   Scheduler();
   ~Scheduler();
 
+  Scheduler(const Scheduler&) = delete;
+  Scheduler& operator=(const Scheduler&) = delete;
+
+  // Run until every coroutine has finished or Stop is called.  If a coroutine
+  // function lets an exception other than AbortException escape, the
+  // coroutine is destroyed and Run rethrows the exception.
   void Run();
-  void Stop() { running_ = false; TriggerInterrupt(); }
+
+  // Make Run return at its next opportunity.  A Stop before Run makes the next
+  // Run return immediately.
+  void Stop() {
+    stop_requested_ = true;
+    TriggerInterrupt();
+  }
+
+  bool IsRunning() const { return running_ && !stop_requested_; }
 
   template<typename Func>
   Coroutine* Spawn(Func&& func, const std::string& name = "",
@@ -195,41 +257,71 @@ public:
     auto coroutine = std::make_unique<Coroutine>(*this, std::forward<Func>(func), name,
                                                  interrupt_fd);
     Coroutine* ptr = coroutine.get();
-    coroutines_.push_back(std::move(coroutine));
-    ptr->SetState(Coroutine::State::kReady);
-    ready_queue_.push_back(ptr);
-    TriggerInterrupt();
+    coroutines_.emplace(ptr, std::move(coroutine));
+    MakeReady(ptr, 0);
     return ptr;
   }
 
+  // Called with each coroutine just before it is destroyed after its function
+  // finishes.
+  void SetCompletionCallback(CompletionCallback callback) {
+    completion_callback_ = std::move(callback);
+  }
+
+  size_t NumCoroutines() const { return coroutines_.size(); }
+
+  // Print every coroutine to stderr.
+  void Show() const;
+  std::vector<std::string> AllCoroutineStrings() const;
+
+  // Every fd the scheduler and its coroutines are using, including the fds
+  // coroutines are waiting on.  A child process can close them after fork.
+  std::vector<int> GetAllFds() const;
+
   void ScheduleCoroutine(Coroutine* coroutine);
-  void WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask, uint64_t timeout_ns);
+  void WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_fds,
+                  uint64_t timeout_ns);
+  void WaitForFd(Coroutine* coroutine, int fd, uint32_t event_mask, uint64_t timeout_ns) {
+    WaitFd wait_fd{fd, event_mask};
+    WaitForFds(coroutine, &wait_fd, 1, timeout_ns);
+  }
   void SleepFor(Coroutine* coroutine, uint64_t nanoseconds);
+  // Wake a coroutine that is waiting, making its wait return value.
   void ResumeCoroutine(Coroutine* coroutine, int value);
   int PollFd(int fd, uint32_t event_mask);
   int AllocateId() { return next_id_++; }
 
 private:
+  void MakeReady(Coroutine* coroutine, int value);
   void ProcessReadyCoroutines();
   void ProcessEvents();
-  // The events a coroutine asked for on fd.  A coroutine that is waiting on
-  // another fd (its interrupt or timer fd) waits for readability.
-  uint32_t WaitMaskFor(Coroutine* coroutine, int fd) const;
-  void CleanupCoroutine(Coroutine* coroutine);
-  void CleanupTimeoutFd(Coroutine* coroutine);
+  // Wake the coroutines waiting on fd for the ready events.
+  void DispatchFdEvents(int fd, uint32_t revents);
+  // Register coroutine as a waiter on fd.  Returns false if fd can't be
+  // waited on.
+  bool AddWaiter(Coroutine* coroutine, int fd);
+  void RemoveWaiter(Coroutine* coroutine, int fd);
+  // Make the epoll registration of fd match what its waiters want.
+  bool UpdateEpoll(int fd);
+  // Remove the coroutine from every fd it is waiting on and close its
+  // timeout timer.
+  void DetachWaits(Coroutine* coroutine);
+  // Create a timer that fires after nanoseconds.  Returns -1 on failure.
+  int CreateTimer(uint64_t nanoseconds);
+  void CloseTimer(int fd);
+  // Called when a coroutine's function has finished.  Destroys the coroutine.
+  void FinishCoroutine(Coroutine* coroutine);
   void TriggerInterrupt();
-#if CO_POLL_MODE == CO_POLL_EPOLL
-  void DispatchEpollEvents(struct epoll_event* events, int count);
-#endif
 
   bool running_ = false;
-  std::vector<std::unique_ptr<Coroutine>> coroutines_;
+  bool stop_requested_ = false;
+  // Destroyed last so that coroutine frames are destroyed while the wait
+  // tables are still valid.  ~Scheduler destroys them explicitly first.
+  absl::flat_hash_map<Coroutine*, std::unique_ptr<Coroutine>> coroutines_;
   std::deque<Coroutine*> ready_queue_;
   absl::flat_hash_map<int, std::vector<Coroutine*>> waiting_fds_;
-  absl::flat_hash_map<Coroutine*, int> coroutine_fds_;
-  // The event mask each coroutine passed to WaitForFd for coroutine_fds_.
-  absl::flat_hash_map<Coroutine*, uint32_t> wait_masks_;
   absl::flat_hash_set<int> timerfds_;
+  CompletionCallback completion_callback_;
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   struct PosixTimerInfo {
@@ -241,6 +333,8 @@ private:
 
 #if CO_POLL_MODE == CO_POLL_EPOLL
   int epoll_fd_ = -1;
+  // The epoll events each fd is registered for.
+  absl::flat_hash_map<int, uint32_t> epoll_events_;
 #endif
 
   int interrupt_fd_ = -1;
@@ -259,6 +353,14 @@ struct BaseAwaitable {
   BaseAwaitable(Coroutine* coroutine, Scheduler* scheduler)
     : coroutine_(coroutine), scheduler_(scheduler) {}
 
+  bool Aborted() const { return coroutine_ != nullptr && coroutine_->IsAborted(); }
+
+  void ThrowIfAborted() const {
+    if (Aborted()) {
+      throw AbortException();
+    }
+  }
+
   bool await_ready() const noexcept { return false; }
 
   void await_suspend(std::coroutine_handle<> handle) const {
@@ -268,16 +370,12 @@ struct BaseAwaitable {
   }
 };
 
-struct YieldAwaitable : BaseAwaitable {
+struct [[nodiscard]] YieldAwaitable : BaseAwaitable {
   using BaseAwaitable::BaseAwaitable;
 
-  bool await_ready() const noexcept { return false; }
+  bool await_ready() const noexcept { return Aborted(); }
 
-  void await_resume() const {
-    if (coroutine_ && coroutine_->IsAborted()) {
-      throw AbortException();
-    }
-  }
+  void await_resume() const { ThrowIfAborted(); }
 
   void await_suspend(std::coroutine_handle<> handle) const {
     BaseAwaitable::await_suspend(handle);
@@ -288,24 +386,30 @@ struct YieldAwaitable : BaseAwaitable {
   }
 };
 
-struct WaitAwaitable : BaseAwaitable {
-  int fd_;
-  uint32_t event_mask_;
+// Poll fds without blocking.  Returns the index of the first ready fd in fds
+// or -1 if none is ready.  If ready is not null, every ready fd is appended to
+// it with its ready events.
+int PollFds(const WaitFd* fds, size_t num_fds, std::vector<WaitFd>* ready = nullptr);
+
+struct [[nodiscard]] WaitAwaitable : BaseAwaitable {
+  WaitFdList fds_;
   uint64_t timeout_ns_;
   mutable int result_ = -1;
+  mutable bool ready_ = false;
 
-  WaitAwaitable(Coroutine* coroutine, Scheduler* scheduler, int fd,
-                 uint32_t event_mask, uint64_t timeout_ns)
-    : BaseAwaitable(coroutine, scheduler), fd_(fd),
-      event_mask_(event_mask), timeout_ns_(timeout_ns) {}
+  WaitAwaitable(Coroutine* coroutine, Scheduler* scheduler, WaitFdList fds,
+                uint64_t timeout_ns)
+    : BaseAwaitable(coroutine, scheduler), fds_(std::move(fds)), timeout_ns_(timeout_ns) {}
 
   bool await_ready() const noexcept {
-    if (coroutine_ && scheduler_) {
-      int result = scheduler_->PollFd(fd_, event_mask_);
-      if (result == fd_) {
-        result_ = fd_;
-        return true;
-      }
+    if (Aborted()) {
+      return true;
+    }
+    int index = PollFds(fds_.data(), fds_.size());
+    if (index >= 0) {
+      result_ = fds_[static_cast<size_t>(index)].fd;
+      ready_ = true;
+      return true;
     }
     return false;
   }
@@ -313,15 +417,13 @@ struct WaitAwaitable : BaseAwaitable {
   void await_suspend(std::coroutine_handle<> handle) const {
     BaseAwaitable::await_suspend(handle);
     if (coroutine_ && scheduler_) {
-      scheduler_->WaitForFd(coroutine_, fd_, event_mask_, timeout_ns_);
+      scheduler_->WaitForFds(coroutine_, fds_.data(), fds_.size(), timeout_ns_);
     }
   }
 
   int await_resume() const {
-    if (coroutine_ && coroutine_->IsAborted()) {
-      throw AbortException();
-    }
-    if (result_ != -1) {
+    ThrowIfAborted();
+    if (ready_) {
       return result_;
     }
     if (coroutine_) {
@@ -331,14 +433,56 @@ struct WaitAwaitable : BaseAwaitable {
   }
 };
 
-struct SleepAwaitable : BaseAwaitable {
+struct [[nodiscard]] WaitAllAwaitable : BaseAwaitable {
+  WaitFdList fds_;
+  uint64_t timeout_ns_;
+  mutable std::vector<WaitFd> ready_fds_;
+  mutable bool ready_ = false;
+
+  WaitAllAwaitable(Coroutine* coroutine, Scheduler* scheduler, WaitFdList fds,
+                   uint64_t timeout_ns)
+    : BaseAwaitable(coroutine, scheduler), fds_(std::move(fds)), timeout_ns_(timeout_ns) {}
+
+  bool await_ready() const noexcept {
+    if (Aborted()) {
+      return true;
+    }
+    ready_ = PollFds(fds_.data(), fds_.size(), &ready_fds_) >= 0;
+    return ready_;
+  }
+
+  void await_suspend(std::coroutine_handle<> handle) const {
+    BaseAwaitable::await_suspend(handle);
+    if (coroutine_ && scheduler_) {
+      scheduler_->WaitForFds(coroutine_, fds_.data(), fds_.size(), timeout_ns_);
+    }
+  }
+
+  std::vector<WaitFd> await_resume() const {
+    ThrowIfAborted();
+    if (!ready_ && coroutine_ != nullptr) {
+      // Woken by one of the fds: collect every fd that is ready now.  A
+      // timeout or interrupt leaves the result empty.
+      const int woken_by = coroutine_->GetWaitResult();
+      for (const WaitFd& fd : fds_) {
+        if (fd.fd == woken_by) {
+          PollFds(fds_.data(), fds_.size(), &ready_fds_);
+          break;
+        }
+      }
+    }
+    return std::move(ready_fds_);
+  }
+};
+
+struct [[nodiscard]] SleepAwaitable : BaseAwaitable {
   uint64_t timeout_ns_;
 
   SleepAwaitable(Coroutine* coroutine, Scheduler* scheduler, uint64_t timeout_ns)
     : BaseAwaitable(coroutine, scheduler), timeout_ns_(timeout_ns) {}
 
   bool await_ready() const noexcept {
-    return timeout_ns_ == 0;
+    return timeout_ns_ == 0 || Aborted();
   }
 
   void await_suspend(std::coroutine_handle<> handle) const {
@@ -348,11 +492,7 @@ struct SleepAwaitable : BaseAwaitable {
     }
   }
 
-  void await_resume() const {
-    if (coroutine_ && coroutine_->IsAborted()) {
-      throw AbortException();
-    }
-  }
+  void await_resume() const { ThrowIfAborted(); }
 };
 
 // --- Coroutine inline implementations (need full Scheduler definition) ---
@@ -360,14 +500,15 @@ struct SleepAwaitable : BaseAwaitable {
 template<typename Func>
 inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string& name,
                             int interrupt_fd)
-  : handle_(),
+  : root_(),
+    handle_(),
     scheduler_(scheduler),
     state_(State::kNew),
     name_(),
     abort_pending_(false),
     id_(scheduler.AllocateId()),
     wait_result_(-1),
-    interrupt_fd_(interrupt_fd == -1 ? -1 : dup(interrupt_fd)) {
+    interrupt_fd_(interrupt_fd == -1 ? -1 : fcntl(interrupt_fd, F_DUPFD_CLOEXEC, 0)) {
   name_ = name.empty() ? "co-" + std::to_string(id_) : name;
 
   // Store the callable so its captures (e.g. lambda captures) remain alive
@@ -385,7 +526,8 @@ inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string
     }
   }();
   if constexpr (requires { task.handle_; }) {
-    handle_ = std::coroutine_handle<>(task.handle_);
+    root_ = std::coroutine_handle<>(task.handle_);
+    handle_ = root_;
     if constexpr (requires { task.handle_.promise().coroutine; }) {
       task.handle_.promise().coroutine = this;
     }
@@ -393,9 +535,21 @@ inline Coroutine::Coroutine(Scheduler& scheduler, Func&& func, const std::string
   }
 }
 
+inline Coroutine::~Coroutine() {
+  // Destroy the frame before the callable whose captures it refers to.
+  if (root_) {
+    root_.destroy();
+  }
+  if (interrupt_fd_ != -1) {
+    close(interrupt_fd_);
+  }
+}
+
 inline void Coroutine::Abort() {
   abort_pending_ = true;
-  scheduler_.ResumeCoroutine(this, -1);
+  if (state_ == State::kWaiting) {
+    scheduler_.ResumeCoroutine(this, -1);
+  }
 }
 
 inline YieldAwaitable Coroutine::Yield() {
@@ -403,7 +557,34 @@ inline YieldAwaitable Coroutine::Yield() {
 }
 
 inline WaitAwaitable Coroutine::Wait(int fd, uint32_t event_mask, uint64_t timeout_ns) {
-  return WaitAwaitable(this, &scheduler_, fd, event_mask, timeout_ns);
+  return WaitAwaitable(this, &scheduler_, WaitFdList{{fd, event_mask}}, timeout_ns);
+}
+
+inline WaitAwaitable Coroutine::Wait(std::initializer_list<int> fds, uint32_t event_mask,
+                                     uint64_t timeout_ns) {
+  WaitFdList list;
+  for (int fd : fds) {
+    list.push_back({fd, event_mask});
+  }
+  return WaitAwaitable(this, &scheduler_, std::move(list), timeout_ns);
+}
+
+inline WaitAwaitable Coroutine::Wait(const std::vector<int>& fds, uint32_t event_mask,
+                                     uint64_t timeout_ns) {
+  WaitFdList list;
+  for (int fd : fds) {
+    list.push_back({fd, event_mask});
+  }
+  return WaitAwaitable(this, &scheduler_, std::move(list), timeout_ns);
+}
+
+inline WaitAwaitable Coroutine::Wait(const std::vector<WaitFd>& fds, uint64_t timeout_ns) {
+  return WaitAwaitable(this, &scheduler_, WaitFdList(fds.begin(), fds.end()), timeout_ns);
+}
+
+inline WaitAllAwaitable Coroutine::WaitAll(const std::vector<WaitFd>& fds,
+                                           uint64_t timeout_ns) {
+  return WaitAllAwaitable(this, &scheduler_, WaitFdList(fds.begin(), fds.end()), timeout_ns);
 }
 
 inline SleepAwaitable Coroutine::Sleep(uint64_t nanoseconds) {
@@ -413,7 +594,7 @@ inline SleepAwaitable Coroutine::Sleep(uint64_t nanoseconds) {
 template <typename Rep, typename Period>
 inline SleepAwaitable Coroutine::Sleep(std::chrono::duration<Rep, Period> duration) {
   auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-  return Sleep(static_cast<uint64_t>(ns));
+  return Sleep(ns > 0 ? static_cast<uint64_t>(ns) : 0);
 }
 
 // Thread-local pointers to the currently running coroutine and its scheduler.
@@ -443,10 +624,18 @@ struct Task {
 
     auto final_suspend() noexcept { return FinalSuspendAwaiter{}; }
 
+    // An escaping AbortException just ends the coroutine.  Anything else is
+    // kept so that Scheduler::Run can rethrow it once the coroutine is gone;
+    // letting it escape handle_.resume() would corrupt the scheduler.
     void unhandled_exception() {
-      // Storing the exception prevents it from escaping handle_.resume(),
-      // which would corrupt scheduler state. The coroutine body should
-      // catch all expected exceptions (including AbortException).
+      try {
+        throw;
+      } catch (const AbortException&) {
+      } catch (...) {
+        if (coroutine) {
+          coroutine->exception_ = std::current_exception();
+        }
+      }
     }
 
     Task get_return_object() {
@@ -466,10 +655,29 @@ struct Task {
   Task(Task&& other) noexcept : handle_(other.handle_) { other.handle_ = {}; }
 };
 
+namespace internal {
+
+// Final awaiter shared by ValueTask<T> promises: resume the awaiting caller.
+template <typename Promise>
+struct ValueTaskFinalAwaiter {
+  bool await_ready() const noexcept { return false; }
+  std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) const noexcept {
+    if (auto cont = h.promise().continuation_; cont) {
+      return cont;
+    }
+    return std::noop_coroutine();
+  }
+  void await_resume() const noexcept {}
+};
+
+}  // namespace internal
+
 // A sub-coroutine that produces a value of type T. Unlike Task (which is
 // managed by the Scheduler), ValueTask<T> is designed to be co_await'ed from
 // within a Task or another ValueTask. It uses symmetric transfer to run inline
-// with the caller, sharing the same Scheduler and Coroutine context.
+// with the caller, sharing the same Scheduler and Coroutine context.  An
+// exception that escapes it, including AbortException, is rethrown in the
+// caller.
 //
 // Usage:
 //   ValueTask<int> ComputeAsync(Coroutine& co) {
@@ -480,33 +688,22 @@ struct Task {
 //   // From within a Task:
 //   int result = co_await ComputeAsync(co);
 template <typename T>
-struct ValueTask {
+struct [[nodiscard]] ValueTask {
   struct promise_type {
-    T value_{};
+    std::optional<T> value_;
+    std::exception_ptr exception_;
     std::coroutine_handle<> continuation_{};
 
     std::suspend_always initial_suspend() noexcept { return {}; }
-
-    struct FinalAwaiter {
-      bool await_ready() const noexcept { return false; }
-      std::coroutine_handle<> await_suspend(
-          std::coroutine_handle<promise_type> h) const noexcept {
-        if (auto cont = h.promise().continuation_; cont)
-          return cont;
-        return std::noop_coroutine();
-      }
-      void await_resume() const noexcept {}
-    };
-
-    FinalAwaiter final_suspend() noexcept { return {}; }
-    void unhandled_exception() {}
+    internal::ValueTaskFinalAwaiter<promise_type> final_suspend() noexcept { return {}; }
+    void unhandled_exception() { exception_ = std::current_exception(); }
 
     ValueTask get_return_object() {
       return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
     }
 
-    template <typename U>
-    void return_value(U&& v) { value_ = std::forward<U>(v); }
+    template <typename U = T>
+    void return_value(U&& v) { value_.emplace(std::forward<U>(v)); }
   };
 
   std::coroutine_handle<promise_type> handle_;
@@ -540,32 +737,24 @@ struct ValueTask {
     if (co20::self && handle_.promise().continuation_) {
       co20::self->SetHandle(handle_.promise().continuation_);
     }
-    return std::move(handle_.promise().value_);
+    if (handle_.promise().exception_) {
+      std::rethrow_exception(handle_.promise().exception_);
+    }
+    return std::move(*handle_.promise().value_);
   }
 };
 
 // Void specialization of ValueTask for sub-coroutines that don't return a
 // value but still need to co_await internally.
 template <>
-struct ValueTask<void> {
+struct [[nodiscard]] ValueTask<void> {
   struct promise_type {
+    std::exception_ptr exception_;
     std::coroutine_handle<> continuation_{};
 
     std::suspend_always initial_suspend() noexcept { return {}; }
-
-    struct FinalAwaiter {
-      bool await_ready() const noexcept { return false; }
-      std::coroutine_handle<> await_suspend(
-          std::coroutine_handle<promise_type> h) const noexcept {
-        if (auto cont = h.promise().continuation_; cont)
-          return cont;
-        return std::noop_coroutine();
-      }
-      void await_resume() const noexcept {}
-    };
-
-    FinalAwaiter final_suspend() noexcept { return {}; }
-    void unhandled_exception() {}
+    internal::ValueTaskFinalAwaiter<promise_type> final_suspend() noexcept { return {}; }
+    void unhandled_exception() { exception_ = std::current_exception(); }
 
     ValueTask get_return_object() {
       return ValueTask{std::coroutine_handle<promise_type>::from_promise(*this)};
@@ -602,19 +791,23 @@ struct ValueTask<void> {
     if (co20::self && handle_.promise().continuation_) {
       co20::self->SetHandle(handle_.promise().continuation_);
     }
+    if (handle_.promise().exception_) {
+      std::rethrow_exception(handle_.promise().exception_);
+    }
   }
 };
 
 // --- Coroutine::Resume (needs thread_local declarations above) ---
 
 inline void Coroutine::Resume(int value) {
-  if (handle_ && !handle_.done()) {
+  if (handle_ && !root_.done()) {
     wait_result_ = value;
     state_ = State::kRunning;
     co20::self = this;
     co20::scheduler = &scheduler_;
     handle_.resume();
-    if (handle_.done()) {
+    co20::self = nullptr;
+    if (root_.done()) {
       state_ = State::kDead;
     }
   }
@@ -631,6 +824,24 @@ inline YieldAwaitable Yield() { return self->Yield(); }
 inline WaitAwaitable Wait(int fd, uint32_t event_mask = POLLIN,
                           uint64_t timeout_ns = 0) {
   return self->Wait(fd, event_mask, timeout_ns);
+}
+
+inline WaitAwaitable Wait(std::initializer_list<int> fds, uint32_t event_mask = POLLIN,
+                          uint64_t timeout_ns = 0) {
+  return self->Wait(fds, event_mask, timeout_ns);
+}
+
+inline WaitAwaitable Wait(const std::vector<int>& fds, uint32_t event_mask = POLLIN,
+                          uint64_t timeout_ns = 0) {
+  return self->Wait(fds, event_mask, timeout_ns);
+}
+
+inline WaitAwaitable Wait(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0) {
+  return self->Wait(fds, timeout_ns);
+}
+
+inline WaitAllAwaitable WaitAll(const std::vector<WaitFd>& fds, uint64_t timeout_ns = 0) {
+  return self->WaitAll(fds, timeout_ns);
 }
 
 inline SleepAwaitable Sleep(uint64_t nanoseconds) {

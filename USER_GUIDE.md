@@ -599,6 +599,46 @@ scheduler.Spawn([pipes]() -> co20::Task {
 `Wait` returns the file descriptor if it became ready, or `-1` on timeout/error.
 Event masks are the standard poll flags: `POLLIN`, `POLLOUT`, etc.
 
+To wait for any of several file descriptors, pass a list.  `Wait` returns the
+first one that is ready:
+
+```cpp
+int fd = co_await co20::Wait({socket_fd, stop_fd}, POLLIN);
+
+// Different events for each fd, with a 1 second timeout.
+int fd = co_await co20::Wait(
+    std::vector<co20::WaitFd>{{in_fd, POLLIN}, {out_fd, POLLOUT}}, 1000000000ULL);
+```
+
+`WaitAll` returns every file descriptor that is ready, with `WaitFd::events`
+set to the ready events.  The result is empty on timeout or interrupt:
+
+```cpp
+std::vector<co20::WaitFd> ready =
+    co_await co20::WaitAll({{a_fd, POLLIN}, {b_fd, POLLIN}});
+```
+
+### Coroutine Lifetime (C++20)
+
+The scheduler owns the coroutines it spawns and destroys each one as soon as
+its function finishes, together with the lambda that produced it.  Don't keep
+a `co20::Coroutine*` past that point.  `SetCompletionCallback` is called with
+each coroutine just before it is destroyed, which is the place to forget any
+pointer to it.
+
+Destroying the scheduler destroys any coroutines that are still suspended,
+running the destructors of their locals, including those of the `ValueTask`s
+they are waiting in.
+
+An exception that escapes a `ValueTask` is rethrown in the coroutine that
+awaited it.  An exception other than `AbortException` that escapes a
+coroutine function makes `Scheduler::Run` rethrow it once the coroutine has
+been destroyed.
+
+`Show()` prints every coroutine to stderr, and `GetAllFds()` returns every
+file descriptor the scheduler and its coroutines are using, so that a child
+process can close them after `fork`.
+
 ### Sleeping (C++20)
 
 ```cpp
@@ -622,7 +662,9 @@ scheduler.Spawn([]() -> co20::Task {
 
 A coroutine can be aborted from another coroutine. The aborted coroutine will
 receive an `AbortException` the next time it hits a `co_await` on `Yield`, `Wait`,
-or `Sleep`. Catch the exception to perform cleanup:
+or `Sleep`.  The exception passes through any `ValueTask`s it is in, and a
+coroutine that lets it escape simply finishes. Catch the exception to perform
+cleanup:
 
 ```cpp
 co20::Scheduler scheduler;

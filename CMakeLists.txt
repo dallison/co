@@ -115,6 +115,8 @@ set_target_properties(co_cpp20 PROPERTIES
 
 target_link_libraries(co_cpp20 PUBLIC
     absl::flat_hash_map
+    absl::flat_hash_set
+    absl::inlined_vector
 )
 
 if(PROJECT_IS_TOP_LEVEL)
