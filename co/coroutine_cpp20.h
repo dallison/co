@@ -165,6 +165,10 @@ public:
   // Poll (immediately, without blocking) is inherited from
   // toolbelt::AsyncWaiter.  It also checks the coroutine's interrupt fd.
 
+  // Give other ready coroutines a turn.  Equivalent to Sleep(0): does not
+  // create a timer.  The scheduler runs Yield-ers in fair passes and parks
+  // on I/O or the interrupt fd between passes, so a Yield-only loop cannot
+  // starve Wait/Sleep or ignore Stop().
   YieldAwaitable Yield();
 
   // Wait for one of a set of fds to become ready.  The result is the fd that
@@ -205,6 +209,9 @@ public:
   State GetState() const { return state_; }
   Scheduler& GetScheduler() const { return scheduler_; }
   int GetInterruptFd() const { return interrupt_fd_; }
+  // Scheduler tick when this coroutine last parked (Yield/Wait/Sleep).
+  // Used to prefer longer-waiting coroutines, matching the stackful scheduler.
+  uint64_t LastTick() const { return last_tick_; }
 
   // A one-line description of the coroutine for debugging.
   std::string ToString() const;
@@ -222,6 +229,7 @@ private:
   void SetState(State state) { state_ = state; }
   void SetWaitResult(int result) { wait_result_ = result; }
   int GetWaitResult() const { return wait_result_; }
+  void SetLastTick(uint64_t tick) { last_tick_ = tick; }
 
   // The poll events this coroutine is waiting for on fd, or 0 if it isn't
   // waiting on it.
@@ -242,9 +250,15 @@ private:
   int wait_result_ = -1;
   int interrupt_fd_ = -1;
   int timeout_fd_ = -1;
+  // Tick count at the last Yield/Wait/Sleep.  Lower means waited longer.
+  uint64_t last_tick_ = 0;
   // The fds (other than the interrupt and timeout fds) passed to the wait the
   // coroutine is suspended in.
   WaitFdList wait_fds_;
+  // Copy of wait_fds_ kept after DetachWaits so a readiness re-check can
+  // re-park the coroutine if another waiter already drained the fd.
+  WaitFdList parked_wait_fds_;
+  uint64_t parked_timeout_ns_ = 0;
   // The fds added by AsyncWaiter::Wait and not yet waited on.
   mutable std::vector<struct pollfd> user_wait_fds_;
   // An exception other than AbortException that escaped the coroutine
@@ -300,6 +314,9 @@ public:
 
   size_t NumCoroutines() const { return coroutines_.size(); }
 
+  // Monotonic resume counter used for wait-time fairness (see LastTick).
+  uint64_t TickCount() const { return tick_count_; }
+
   // Print every coroutine to stderr.
   void Show() const;
   std::vector<std::string> AllCoroutineStrings() const;
@@ -307,6 +324,9 @@ public:
   // Every fd the scheduler and its coroutines are using, including the fds
   // coroutines are waiting on.  A child process can close them after fork.
   std::vector<int> GetAllFds() const;
+
+  // Coroutine::Resume advances the tick counter.
+  friend class Coroutine;
 
   void ScheduleCoroutine(Coroutine* coroutine);
   void WaitForFds(Coroutine* coroutine, const WaitFd* fds, size_t num_fds,
@@ -323,7 +343,17 @@ public:
 
 private:
   void MakeReady(Coroutine* coroutine, int value);
+  // Run at most one fair pass over the coroutines that were ready when the
+  // call started.  Yield re-queues, so draining until empty would never
+  // return and would pin the CPU.
   void ProcessReadyCoroutines();
+  // Drain ready I/O without blocking (timeout_ms == 0) or block until
+  // something is ready (timeout_ms < 0).  Called after every resume so a
+  // Yield-only coroutine cannot starve waiters on the poll() backend.
+  void PollWaitingFds(int timeout_ms);
+  // Block on the scheduler interrupt fd only (used when nothing is waiting
+  // on user fds but Yield-ers remain).  timeout_ms < 0 waits forever.
+  void WaitOnInterrupt(int timeout_ms);
   void ProcessEvents();
   // Wake the coroutines waiting on fd for the ready events.
   void DispatchFdEvents(int fd, uint32_t revents);
@@ -352,6 +382,8 @@ private:
   absl::flat_hash_map<int, std::vector<Coroutine*>> waiting_fds_;
   absl::flat_hash_set<int> timerfds_;
   CompletionCallback completion_callback_;
+  // Advanced on every Resume; stamped into Coroutine::last_tick_ when parking.
+  uint64_t tick_count_ = 0;
 
 #if CO_TIMER_MODE == CO_TIMER_POSIX
   struct PosixTimerInfo {
@@ -835,6 +867,7 @@ struct [[nodiscard]] ValueTask<void> {
 
 inline void Coroutine::Resume(int value) {
   if (handle_ && !root_.done()) {
+    ++scheduler_.tick_count_;
     wait_result_ = value;
     state_ = State::kRunning;
     co20::self = this;
