@@ -408,6 +408,18 @@ private:
 
 // --- Awaitable types ---
 
+// [[nodiscard]] reasons.  A co20 task or awaitable is lazy: calling the
+// function that returns it does nothing until the result is co_awaited (or
+// spawned).  Dropping it silently skips the work, so the compiler's warning
+// says so.
+#define CO20_NODISCARD_TASK                                                       \
+  [[nodiscard("co20 coroutines are lazy: the body does not run unless the "      \
+              "result is co_await'ed (or spawned); did you forget co_await?")]]
+#define CO20_NODISCARD_AWAITABLE                                                  \
+  [[nodiscard("a co20 awaitable does nothing unless it is co_await'ed; "         \
+              "did you forget co_await?")]]
+
+
 struct BaseAwaitable {
   Coroutine* coroutine_ = nullptr;
   Scheduler* scheduler_ = nullptr;
@@ -432,7 +444,7 @@ struct BaseAwaitable {
   }
 };
 
-struct [[nodiscard]] YieldAwaitable : BaseAwaitable {
+struct CO20_NODISCARD_AWAITABLE YieldAwaitable : BaseAwaitable {
   using BaseAwaitable::BaseAwaitable;
 
   bool await_ready() const noexcept { return Aborted(); }
@@ -453,7 +465,7 @@ struct [[nodiscard]] YieldAwaitable : BaseAwaitable {
 // it with its ready events.
 int PollFds(const WaitFd* fds, size_t num_fds, std::vector<WaitFd>* ready = nullptr);
 
-struct [[nodiscard]] WaitAwaitable : BaseAwaitable {
+struct CO20_NODISCARD_AWAITABLE WaitAwaitable : BaseAwaitable {
   WaitFdList fds_;
   uint64_t timeout_ns_;
   mutable int result_ = -1;
@@ -495,7 +507,7 @@ struct [[nodiscard]] WaitAwaitable : BaseAwaitable {
   }
 };
 
-struct [[nodiscard]] WaitAllAwaitable : BaseAwaitable {
+struct CO20_NODISCARD_AWAITABLE WaitAllAwaitable : BaseAwaitable {
   WaitFdList fds_;
   uint64_t timeout_ns_;
   mutable std::vector<WaitFd> ready_fds_;
@@ -537,7 +549,7 @@ struct [[nodiscard]] WaitAllAwaitable : BaseAwaitable {
   }
 };
 
-struct [[nodiscard]] SleepAwaitable : BaseAwaitable {
+struct CO20_NODISCARD_AWAITABLE SleepAwaitable : BaseAwaitable {
   uint64_t timeout_ns_;
 
   SleepAwaitable(Coroutine* coroutine, Scheduler* scheduler, uint64_t timeout_ns)
@@ -672,7 +684,7 @@ extern thread_local Coroutine* self;
 extern thread_local Scheduler* scheduler;
 
 // Task type returned by coroutine functions: [](Coroutine& co) -> Task { ... }
-struct Task {
+struct CO20_NODISCARD_TASK Task {
   struct promise_type {
     Coroutine* coroutine = nullptr;
 
@@ -754,7 +766,7 @@ struct ValueTaskFinalAwaiter {
 //   // From within a Task:
 //   int result = co_await ComputeAsync(co);
 template <typename T>
-struct [[nodiscard]] ValueTask {
+struct CO20_NODISCARD_TASK ValueTask {
   struct promise_type {
     std::optional<T> value_;
     std::exception_ptr exception_;
@@ -813,7 +825,7 @@ struct [[nodiscard]] ValueTask {
 // Void specialization of ValueTask for sub-coroutines that don't return a
 // value but still need to co_await internally.
 template <>
-struct [[nodiscard]] ValueTask<void> {
+struct CO20_NODISCARD_TASK ValueTask<void> {
   struct promise_type {
     std::exception_ptr exception_;
     std::coroutine_handle<> continuation_{};
@@ -935,5 +947,8 @@ inline SleepAwaitable Millisleep(uint64_t ms) {
 }
 
 } // namespace co20
+
+#undef CO20_NODISCARD_TASK
+#undef CO20_NODISCARD_AWAITABLE
 
 #endif // CO20_HAVE_COROUTINES
