@@ -1640,6 +1640,128 @@ TEST(Cpp20AsyncWaiter, InterruptFdEndsBlockingWait) {
   close(interrupt[1]);
 }
 
+// Both fds become ready in the same poll.  The coroutine must be resumed once
+// and must then be able to wait again.
+TEST(Cpp20MultiWait, BothReadyResumesOnce) {
+  Scheduler sched;
+  int a[2];
+  int b[2];
+  ASSERT_EQ(0, pipe(a));
+  ASSERT_EQ(0, pipe(b));
+
+  int wakes = 0;
+  bool second_wait_done = false;
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Wait(std::vector<int>{a[0], b[0]}, POLLIN);
+    wakes++;
+    char c;
+    (void)read(a[0], &c, 1);
+    (void)read(b[0], &c, 1);
+    co_await co.Sleep(std::chrono::milliseconds(20));
+    second_wait_done = true;
+  }, "waiter");
+  sched.Spawn([&](Coroutine& co) -> Task {
+    co_await co.Sleep(std::chrono::milliseconds(10));
+    char c = 'x';
+    (void)write(a[1], &c, 1);
+    (void)write(b[1], &c, 1);
+  }, "writer");
+
+  sched.Run();
+  EXPECT_EQ(1, wakes);
+  EXPECT_TRUE(second_wait_done);
+  close(a[0]);
+  close(a[1]);
+  close(b[0]);
+  close(b[1]);
+}
+
+// Fails to compile if a promise holding it is built from the coroutine's
+// arguments instead of being default constructed.  GCC treats a promise with
+// no user-declared constructor as an aggregate and tries to initialize it from
+// the arguments of a member function coroutine.
+struct FromAnything {
+  FromAnything() = default;
+  template <typename U>
+  FromAnything(U&&) {
+    static_assert(!std::is_same_v<U, U>, "promise built from an argument");
+  }
+};
+
+struct MemberCoroutines {
+  int value = 7;
+  ValueTask<FromAnything> Make() { co_return FromAnything(); }
+  ValueTask<int> Get() { co_return value; }
+  ValueTask<void> Nothing() { co_return; }
+};
+
+TEST(Cpp20ValueTask, MemberFunctionValueTasks) {
+  Scheduler sched;
+  MemberCoroutines m;
+  int got = 0;
+  sched.Spawn([&](Coroutine& co) -> Task {
+    (void)co_await m.Make();
+    co_await m.Nothing();
+    got = co_await m.Get();
+  });
+  sched.Run();
+  EXPECT_EQ(7, got);
+}
+
+// Counts its live instances.
+struct FrameLocal {
+  explicit FrameLocal(int& live) : live_(live) { ++live_; }
+  ~FrameLocal() { --live_; }
+  int& live_;
+};
+
+ValueTask<void> WaitInner(Coroutine& co, int fd, int& live) {
+  FrameLocal local(live);
+  co_await co.Wait(fd, POLLIN);
+}
+
+ValueTask<int> WaitOuter(Coroutine& co, int fd, int& live) {
+  FrameLocal local(live);
+  co_await WaitInner(co, fd, live);
+  co_return 1;
+}
+
+// Stop() from one coroutine ends Run() while another waits on an fd, and the
+// nested frames of the waiting coroutine are destroyed with the scheduler.
+TEST(Cpp20Lifetime, StopWhileWaitingDestroysNestedFrames) {
+  int fds[2];
+  ASSERT_EQ(0, pipe(fds));
+  int live = 0;
+  {
+    Scheduler sched;
+    sched.Spawn([&](Coroutine& co) -> Task {
+      FrameLocal local(live);
+      (void)co_await WaitOuter(co, fds[0], live);
+    });
+    sched.Spawn([&](Coroutine& co) -> Task {
+      co_await co.Sleep(std::chrono::milliseconds(1));
+      sched.Stop();
+    });
+    sched.Run();
+    EXPECT_EQ(3, live);
+  }
+  EXPECT_EQ(0, live);
+  close(fds[0]);
+  close(fds[1]);
+}
+
+// A finished coroutine is freed, along with the callable that made it.
+TEST(Cpp20Lifetime, FinishedCoroutineReleasesCallable) {
+  Scheduler sched;
+  auto token = std::make_shared<int>(0);
+  sched.Spawn([token](Coroutine& co) -> Task {
+    co_await co.Yield();
+  }, "holder");
+  EXPECT_EQ(2, token.use_count());
+  sched.Run();
+  EXPECT_EQ(1, token.use_count());
+}
+
 } // namespace co20
 
 #endif // CO20_HAVE_COROUTINES
