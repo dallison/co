@@ -60,6 +60,7 @@
 
 #if CO20_HAVE_COROUTINES
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -373,8 +374,9 @@ private:
   void FinishCoroutine(Coroutine* coroutine);
   void TriggerInterrupt();
 
-  bool running_ = false;
-  bool stop_requested_ = false;
+  // Stop is called from other threads while Run reads these on the scheduler's thread.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
   // Destroyed last so that coroutine frames are destroyed while the wait
   // tables are still valid.  ~Scheduler destroys them explicitly first.
   absl::flat_hash_map<Coroutine*, std::unique_ptr<Coroutine>> coroutines_;
@@ -768,6 +770,11 @@ struct ValueTaskFinalAwaiter {
 template <typename T>
 struct CO20_NODISCARD_TASK ValueTask {
   struct promise_type {
+    // Declared so promise_type is not an aggregate.  GCC otherwise tries to
+    // initialize it from the coroutine's arguments, which fails to compile
+    // for a member function whose object T can't be built from.
+    promise_type() {}
+
     std::optional<T> value_;
     std::exception_ptr exception_;
     std::coroutine_handle<> continuation_{};
@@ -827,6 +834,9 @@ struct CO20_NODISCARD_TASK ValueTask {
 template <>
 struct CO20_NODISCARD_TASK ValueTask<void> {
   struct promise_type {
+    // See ValueTask<T>::promise_type.
+    promise_type() {}
+
     std::exception_ptr exception_;
     std::coroutine_handle<> continuation_{};
 
