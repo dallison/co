@@ -60,6 +60,7 @@
 
 #if CO20_HAVE_COROUTINES
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -373,8 +374,9 @@ private:
   void FinishCoroutine(Coroutine* coroutine);
   void TriggerInterrupt();
 
-  bool running_ = false;
-  bool stop_requested_ = false;
+  // Stop is called from other threads while Run reads these on the scheduler's thread.
+  std::atomic<bool> running_{false};
+  std::atomic<bool> stop_requested_{false};
   // Destroyed last so that coroutine frames are destroyed while the wait
   // tables are still valid.  ~Scheduler destroys them explicitly first.
   absl::flat_hash_map<Coroutine*, std::unique_ptr<Coroutine>> coroutines_;

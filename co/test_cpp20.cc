@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -1483,6 +1484,26 @@ TEST(Cpp20Scheduler, StopBeforeRunReturnsImmediately) {
   // The stop is used up, so the next Run runs the coroutine.
   sched.Run();
   EXPECT_TRUE(ran);
+}
+
+TEST(Cpp20Scheduler, StopFromAnotherThreadStopsRun) {
+  // Stop is meant to be called from a thread other than the one running the
+  // scheduler, so its flag must be safe to share with Run.
+  Scheduler sched;
+  sched.Spawn([&]() -> Task {
+    for (;;) {
+      co_await Sleep(std::chrono::milliseconds(1));
+    }
+  });
+  std::thread stopper([&]() {
+    while (!sched.IsRunning()) {
+      std::this_thread::yield();
+    }
+    sched.Stop();
+  });
+  sched.Run();
+  stopper.join();
+  EXPECT_FALSE(sched.IsRunning());
 }
 
 TEST(Cpp20Scheduler, IsRunning) {
